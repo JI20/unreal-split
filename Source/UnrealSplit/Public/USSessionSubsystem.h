@@ -14,8 +14,9 @@
  * travel, which any session flow depends on.
  *
  * Session mode is deliberately invisible to the view system — both modes render
- * two view slots — so this subsystem also owns creating the shadow local player
- * that gives an online client a view of the remote player.
+ * two view slots — so this subsystem also owns setting up the shadow view that
+ * gives an online client a view of the remote player. How that view is produced
+ * is still open; it is selected by the comparison spike in plan step 1.6.
  */
 UCLASS()
 class UNREALSPLIT_API UUSSessionSubsystem : public UGameInstanceSubsystem
