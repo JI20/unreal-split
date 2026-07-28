@@ -1,4 +1,4 @@
-// Copyright (c) ji20. All Rights Reserved.
+// Copyright (c) Jonas Itt. All Rights Reserved.
 
 #include "USViewSubsystem.h"
 

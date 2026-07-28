@@ -1,4 +1,4 @@
-// Copyright (c) ji20. All Rights Reserved.
+// Copyright (c) Jonas Itt. All Rights Reserved.
 
 using UnrealBuildTool;
 
@@ -22,6 +22,8 @@ public class UnrealSplit : ModuleRules
 		PrivateDependencyModuleNames.AddRange(
 			new string[]
 			{
+				// UGameMapsSettings, for the entry-map fallback when a session ends.
+				"EngineSettings",
 				"NetCore",
 				"OnlineSubsystem",
 				"OnlineSubsystemUtils"
