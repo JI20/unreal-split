@@ -30,14 +30,15 @@ namespace
 	}
 }
 
-static FAutoConsoleCommandWithWorld GUSHostCommand(
+static FAutoConsoleCommandWithWorldAndArgs GUSHostCommand(
 	TEXT("US.Host"),
-	TEXT("UnrealSplit: create a session and reopen the current level as a listen server."),
-	FConsoleCommandWithWorldDelegate::CreateLambda([](UWorld* World)
+	TEXT("UnrealSplit: create a session and reopen the current level as a listen server. Usage: US.Host [MaxPlayers] (defaults to 2). Count every couch player: a machine hosting two locals plus one remote client needs 3."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
 	{
 		if (UUSSessionSubsystem* Sessions = FindSessionSubsystem(World))
 		{
-			Sessions->HostSession();
+			const int32 MaxPlayers = Args.Num() > 0 ? FCString::Atoi(*Args[0]) : 2;
+			Sessions->HostSession(MaxPlayers);
 		}
 	}));
 
@@ -72,6 +73,28 @@ static FAutoConsoleCommandWithWorld GUSLeaveCommand(
 		if (UUSSessionSubsystem* Sessions = FindSessionSubsystem(World))
 		{
 			Sessions->LeaveSession();
+		}
+	}));
+
+static FAutoConsoleCommandWithWorld GUSAddLocalPlayerCommand(
+	TEXT("US.AddLocalPlayer"),
+	TEXT("UnrealSplit: add a couch co-op player on this machine (vertical splitscreen). On a joined client this asks the host for a split join, which needs a free public connection there."),
+	FConsoleCommandWithWorldDelegate::CreateLambda([](UWorld* World)
+	{
+		if (UUSSessionSubsystem* Sessions = FindSessionSubsystem(World))
+		{
+			Sessions->AddLocalCoopPlayer();
+		}
+	}));
+
+static FAutoConsoleCommandWithWorld GUSRemoveLocalPlayerCommand(
+	TEXT("US.RemoveLocalPlayer"),
+	TEXT("UnrealSplit: remove the most recently added couch co-op player."),
+	FConsoleCommandWithWorldDelegate::CreateLambda([](UWorld* World)
+	{
+		if (UUSSessionSubsystem* Sessions = FindSessionSubsystem(World))
+		{
+			Sessions->RemoveLocalCoopPlayer();
 		}
 	}));
 

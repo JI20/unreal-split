@@ -4,9 +4,16 @@
 
 #include "Engine/Engine.h"
 #include "Engine/GameInstance.h"
+#include "Engine/LocalPlayer.h"
 #include "Engine/World.h"
+#include "GameFramework/GameModeBase.h"
+#include "GameFramework/GameStateBase.h"
+#include "GameFramework/OnlineReplStructs.h"
 #include "GameFramework/PlayerController.h"
+#include "GameFramework/PlayerState.h"
 #include "GameMapsSettings.h"
+#include "GenericPlatform/GenericPlatformInputDeviceMapper.h"
+#include "Interfaces/OnlineIdentityInterface.h"
 #include "Interfaces/OnlineSessionInterface.h"
 #include "Kismet/GameplayStatics.h"
 #include "Misc/PackageName.h"
@@ -33,6 +40,13 @@ namespace
 		const UWorld* World = GameInstance ? GameInstance->GetWorld() : nullptr;
 		return World ? Online::GetSessionInterface(World) : nullptr;
 	}
+
+	/** Identity interface of the same backend; missing on backends without one. */
+	IOnlineIdentityPtr GetIdentityInterface(const UGameInstance* GameInstance)
+	{
+		const UWorld* World = GameInstance ? GameInstance->GetWorld() : nullptr;
+		return World ? Online::GetIdentityInterface(World) : nullptr;
+	}
 }
 
 void UUSSessionSubsystem::Initialize(FSubsystemCollectionBase& Collection)
@@ -45,7 +59,11 @@ void UUSSessionSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 		TravelFailureHandle = GEngine->OnTravelFailure().AddUObject(this, &UUSSessionSubsystem::HandleTravelFailure);
 	}
 
-	UE_LOG(LogUnrealSplit, Log, TEXT("Session subsystem initialized. LANMatch=%d"), bUseLANMatch ? 1 : 0);
+	// Global rather than per-game-mode, so registration works no matter which
+	// game mode class the game uses.
+	PostLoginHandle = FGameModeEvents::GameModePostLoginEvent.AddUObject(this, &UUSSessionSubsystem::HandleGameModePostLogin);
+
+	UE_LOG(LogUnrealSplit, Log, TEXT("Session subsystem initialized. LANMatch=%d MaxTotalPlayers=%d"), bUseLANMatch ? 1 : 0, MaxTotalPlayers);
 }
 
 void UUSSessionSubsystem::Deinitialize()
@@ -59,6 +77,12 @@ void UUSSessionSubsystem::Deinitialize()
 	}
 	NetworkFailureHandle.Reset();
 	TravelFailureHandle.Reset();
+
+	FGameModeEvents::GameModePostLoginEvent.Remove(PostLoginHandle);
+	PostLoginHandle.Reset();
+
+	PendingLoginLocalUserIndex = INDEX_NONE;
+	PendingLoginPlatformUser = PLATFORMUSERID_NONE;
 
 	SessionSearch.Reset();
 	FoundSessions.Reset();
@@ -92,8 +116,16 @@ void UUSSessionSubsystem::HostSession(int32 MaxPlayers)
 		return;
 	}
 
+	// Advertising more seats than the game will fill only produces clients that
+	// travel in and get refused at login, so the cap wins over the argument.
+	const int32 AdvertisedPlayers = FMath::Clamp(MaxPlayers, 1, FMath::Max(1, MaxTotalPlayers));
+	if (AdvertisedPlayers != MaxPlayers)
+	{
+		UE_LOG(LogUnrealSplit, Warning, TEXT("HostSession asked for %d players; advertising %d, the MaxTotalPlayers cap."), MaxPlayers, AdvertisedPlayers);
+	}
+
 	FOnlineSessionSettings Settings;
-	Settings.NumPublicConnections = FMath::Max(1, MaxPlayers);
+	Settings.NumPublicConnections = AdvertisedPlayers;
 	Settings.NumPrivateConnections = 0;
 	Settings.bShouldAdvertise = true;
 	Settings.bAllowJoinInProgress = true;
@@ -154,6 +186,11 @@ void UUSSessionSubsystem::OnCreateSessionFinished(uint32 OperationId, bool bWasS
 	}
 
 	SetSessionState(EUSSessionState::Hosting);
+
+	// The listen reopen below re-runs every local login, and the PostLogin hook
+	// registers players then too. Registering here as well covers flows that
+	// never travel, at no cost: registration is idempotent.
+	RegisterLocalPlayersWithSession(TEXT("HostSession"));
 
 	// Deliberately not calling StartSession: it moves the session to InProgress,
 	// which some backends treat as no longer joinable. Co-op wants join-in-progress.
@@ -283,6 +320,22 @@ void UUSSessionSubsystem::JoinFoundSession(int32 SearchResultIndex)
 		return;
 	}
 
+	// Every local player travels along and asks the host for a seat, so a machine
+	// with more players than the host has free seats cannot join at all. Checked
+	// here because the host would otherwise accept the first player and refuse the
+	// rest mid-travel, which drops the whole connection.
+	// Counts local players, not game players: if the shadow view of plan step 1.6
+	// ends up being a controller-less ULocalPlayer, it has to be excluded here.
+	const int32 NumLocalPlayers = GetGameInstance()->GetNumLocalPlayers();
+	const int32 OpenSeats = FoundSessions[SearchResultIndex].OpenPublicConnections;
+	if (NumLocalPlayers > OpenSeats)
+	{
+		UE_LOG(LogUnrealSplit, Warning, TEXT("JoinFoundSession rejected: this machine has %d local player(s) but the session only has %d free seat(s). Remove a local player or pick another session."),
+			NumLocalPlayers, OpenSeats);
+		OnJoinCompletedDelegate.Broadcast(false);
+		return;
+	}
+
 	const IOnlineSessionPtr Sessions = GetSessionInterface(GetGameInstance());
 	if (!Sessions.IsValid())
 	{
@@ -360,6 +413,11 @@ void UUSSessionSubsystem::OnJoinSessionFinished(uint32 OperationId, bool bSucces
 
 	SetSessionState(EUSSessionState::InSessionAsClient);
 
+	// The client keeps its own copy of the session; its local players belong in
+	// it just like on the host. The host registers them on its side when their
+	// logins arrive through the PostLogin hook.
+	RegisterLocalPlayersWithSession(TEXT("JoinFoundSession"));
+
 	UE_LOG(LogUnrealSplit, Log, TEXT("Joined session. Travelling to '%s'."), *ConnectString);
 	PlayerController->ClientTravel(ConnectString, TRAVEL_Absolute);
 
@@ -385,6 +443,238 @@ void UUSSessionSubsystem::LeaveSession()
 	}
 
 	AbortSession(TEXT("LeaveSession"));
+}
+
+bool UUSSessionSubsystem::AddLocalCoopPlayer()
+{
+	UGameInstance* GameInstance = GetGameInstance();
+	const int32 NumLocalPlayers = GameInstance->GetNumLocalPlayers();
+
+	// Counts remote players too: a client whose host already fills the game gets
+	// no second seat here, and the engine would refuse the split join anyway.
+	const int32 KnownPlayers = GetKnownPlayerCount();
+	if (KnownPlayers >= MaxTotalPlayers)
+	{
+		UE_LOG(LogUnrealSplit, Warning, TEXT("AddLocalCoopPlayer rejected: the game already has %d of %d player(s) (%d local on this machine)."), KnownPlayers, MaxTotalPlayers, NumLocalPlayers);
+		return false;
+	}
+
+	if (PendingLoginLocalUserIndex != INDEX_NONE)
+	{
+		UE_LOG(LogUnrealSplit, Warning, TEXT("AddLocalCoopPlayer rejected: the online login of local user %d is still in flight."), PendingLoginLocalUserIndex);
+		return false;
+	}
+
+	if (SessionState == EUSSessionState::Creating || SessionState == EUSSessionState::Joining || SessionState == EUSSessionState::Leaving)
+	{
+		// The player would log in against a world that is about to be replaced by
+		// travel, and register into a session that may not survive the operation.
+		UE_LOG(LogUnrealSplit, Warning, TEXT("AddLocalCoopPlayer rejected: state is %s. Wait for the session operation to resolve."), *UEnum::GetValueAsString(SessionState));
+		return false;
+	}
+
+	// Ask the platform for the user at the next seat instead of assuming a
+	// controller id. The platform's device mapper owns which physical devices
+	// drive that user: on desktop, keyboard/mouse and gamepad 0 stay with the
+	// primary user, and each later user gets the gamepad matching its index.
+	const FPlatformUserId UserId = IPlatformInputDeviceMapper::Get().GetPlatformUserForUserIndex(NumLocalPlayers);
+	if (!UserId.IsValid())
+	{
+		UE_LOG(LogUnrealSplit, Error, TEXT("AddLocalCoopPlayer failed: the platform did not provide a user for local player index %d."), NumLocalPlayers);
+		return false;
+	}
+
+	// The player's session identity is taken from its local player at login
+	// time and never revisited: the authority reads it in InitNewPlayer, and a
+	// client puts it straight into the split-join message. Backends only
+	// auto-login the primary user, so without logging this one in first the
+	// player would carry an invalid id and could never be registered.
+	const IOnlineIdentityPtr Identity = GetIdentityInterface(GameInstance);
+	const int32 LocalUserIndex = IPlatformInputDeviceMapper::Get().GetUserIndexForPlatformUser(UserId);
+	const bool bNeedsLogin = Identity.IsValid() && LocalUserIndex >= 0 && Identity->GetLoginStatus(LocalUserIndex) != ELoginStatus::LoggedIn;
+
+	if (!bNeedsLogin)
+	{
+		// Either already logged in, or a backend without identities at all —
+		// pure couch co-op works without one.
+		return CreateLocalCoopPlayerForUser(UserId);
+	}
+
+	PendingLoginLocalUserIndex = LocalUserIndex;
+	PendingLoginPlatformUser = UserId;
+
+	LoginCompleteHandle = Identity->AddOnLoginCompleteDelegate_Handle(LocalUserIndex,
+		FOnLoginCompleteDelegate::CreateWeakLambda(this, [this](int32 InLocalUserIndex, bool bWasSuccessful, const FUniqueNetId& /*UserId*/, const FString& ErrorString)
+		{
+			OnLocalCoopPlayerLoginFinished(InLocalUserIndex, bWasSuccessful, ErrorString);
+		}));
+
+	UE_LOG(LogUnrealSplit, Log, TEXT("Logging local user %d into the online backend before adding it as a local player."), LocalUserIndex);
+
+	// Same contract as the session calls: a backend may run the completion
+	// synchronously and still report failure from the call itself.
+	if (!Identity->AutoLogin(LocalUserIndex) && PendingLoginLocalUserIndex == LocalUserIndex)
+	{
+		OnLocalCoopPlayerLoginFinished(LocalUserIndex, false, TEXT("AutoLogin was rejected by the backend before going async"));
+		return false;
+	}
+
+	if (PendingLoginLocalUserIndex != INDEX_NONE)
+	{
+		UE_LOG(LogUnrealSplit, Log, TEXT("Waiting for the login of local user %d; the player is added once it completes."), LocalUserIndex);
+		return false;
+	}
+
+	// Synchronous backends (Null/LAN) already ran the completion above.
+	return GameInstance->GetNumLocalPlayers() > NumLocalPlayers;
+}
+
+bool UUSSessionSubsystem::CreateLocalCoopPlayerForUser(FPlatformUserId UserId)
+{
+	UGameInstance* GameInstance = GetGameInstance();
+	const int32 NumLocalPlayers = GameInstance->GetNumLocalPlayers();
+
+	// Re-checked because an asynchronous login resolves long after the request,
+	// and a remote player may have joined in the meantime.
+	const int32 KnownPlayers = GetKnownPlayerCount();
+	if (KnownPlayers >= MaxTotalPlayers)
+	{
+		UE_LOG(LogUnrealSplit, Warning, TEXT("AddLocalCoopPlayer rejected: the game already has %d of %d player(s) (%d local on this machine)."), KnownPlayers, MaxTotalPlayers, NumLocalPlayers);
+		return false;
+	}
+
+	FString Error;
+	const ULocalPlayer* NewPlayer = GameInstance->CreateLocalPlayer(UserId, Error, /*bSpawnPlayerController*/ true);
+	if (NewPlayer == nullptr)
+	{
+		UE_LOG(LogUnrealSplit, Error, TEXT("AddLocalCoopPlayer failed: %s"), *Error);
+		return false;
+	}
+
+	TArray<FInputDeviceId> PairedDevices;
+	IPlatformInputDeviceMapper::Get().GetAllInputDevicesForUser(UserId, PairedDevices);
+	UE_LOG(LogUnrealSplit, Log, TEXT("Local co-op player added: now %d local player(s), PlatformUser=%d with %d paired input device(s)."),
+		GameInstance->GetNumLocalPlayers(), UserId.GetInternalId(), PairedDevices.Num());
+
+	// A backend that derives ids from the machine alone gives every local user the
+	// same one, and the session then counts two couch players as one. Config fixes
+	// it per backend (Null: bAddUserNumToNullId), so say so instead of miscounting
+	// quietly.
+	const FUniqueNetIdRepl NewPlayerId = NewPlayer->GetPreferredUniqueNetId();
+	if (NewPlayerId.IsValid())
+	{
+		for (const ULocalPlayer* ExistingPlayer : GameInstance->GetLocalPlayers())
+		{
+			if (ExistingPlayer != nullptr && ExistingPlayer != NewPlayer && ExistingPlayer->GetPreferredUniqueNetId() == NewPlayerId)
+			{
+				UE_LOG(LogUnrealSplit, Warning, TEXT("Local players share the online id '%s', so the session counts them as one player. Give each local user its own identity in the active backend's config."), *NewPlayerId.ToDebugString());
+				break;
+			}
+		}
+	}
+
+	// On the authority the login this triggered already ran through the PostLogin
+	// hook, which registered the player in any live session. A client instead has
+	// to ask the host, which CreateLocalPlayer did for us.
+	const UWorld* World = GameInstance->GetWorld();
+	if (World && World->GetNetMode() == NM_Client)
+	{
+		// The split join carries this player's unique net id
+		// (ULocalPlayer::SendSplitJoin), so the pawn appears when the host answers
+		// and the host's PostLogin registers it there. Nothing to register locally
+		// — the client's session copy is the engine's to update when the new
+		// player state replicates in.
+		UE_LOG(LogUnrealSplit, Log, TEXT("Asked the host for a split join for this player. A host without a free public connection disconnects the whole client, so host with MaxPlayers high enough for every couch player."));
+	}
+
+	return true;
+}
+
+int32 UUSSessionSubsystem::GetKnownPlayerCount() const
+{
+	const UGameInstance* GameInstance = GetGameInstance();
+	const UWorld* World = GameInstance ? GameInstance->GetWorld() : nullptr;
+	if (World == nullptr)
+	{
+		return 0;
+	}
+
+	// GetNumPlayers is not const, and the authority is the only place with the
+	// full picture: its own local players, split-join children, remote clients.
+	if (AGameModeBase* GameMode = World->GetAuthGameMode())
+	{
+		return GameMode->GetNumPlayers();
+	}
+
+	if (const AGameStateBase* GameState = World->GetGameState())
+	{
+		// A client can only know the replicated list, which is what it should
+		// judge by anyway — the host makes the final call at login.
+		return GameState->PlayerArray.Num();
+	}
+
+	return GameInstance->GetNumLocalPlayers();
+}
+
+void UUSSessionSubsystem::OnLocalCoopPlayerLoginFinished(int32 LocalUserIndex, bool bWasSuccessful, const FString& ErrorString)
+{
+	if (LocalUserIndex != PendingLoginLocalUserIndex)
+	{
+		// A login this subsystem did not ask for, or one it already handled.
+		return;
+	}
+
+	// Clears against the pending index, so it has to run before that is reset.
+	ClearLoginDelegate();
+
+	const FPlatformUserId UserId = PendingLoginPlatformUser;
+	PendingLoginLocalUserIndex = INDEX_NONE;
+	PendingLoginPlatformUser = PLATFORMUSERID_NONE;
+
+	if (!bWasSuccessful)
+	{
+		UE_LOG(LogUnrealSplit, Error, TEXT("AddLocalCoopPlayer failed: could not log local user %d into the online backend ('%s')."), LocalUserIndex, *ErrorString);
+		return;
+	}
+
+	CreateLocalCoopPlayerForUser(UserId);
+}
+
+bool UUSSessionSubsystem::RemoveLocalCoopPlayer()
+{
+	UGameInstance* GameInstance = GetGameInstance();
+	const int32 NumLocalPlayers = GameInstance->GetNumLocalPlayers();
+
+	if (NumLocalPlayers <= 1)
+	{
+		UE_LOG(LogUnrealSplit, Warning, TEXT("RemoveLocalCoopPlayer rejected: the primary local player cannot be removed."));
+		return false;
+	}
+
+	const UWorld* World = GameInstance->GetWorld();
+	if (World && World->GetNetMode() == NM_Client)
+	{
+		// UGameInstance::RemoveLocalPlayer would drop the viewport but never
+		// tell the server, stranding the player's pawn in the session.
+		UE_LOG(LogUnrealSplit, Warning, TEXT("RemoveLocalCoopPlayer rejected while connected to a remote host. Leave the session first."));
+		return false;
+	}
+
+	ULocalPlayer* PlayerToRemove = GameInstance->GetLocalPlayerByIndex(NumLocalPlayers - 1);
+	const FPlatformUserId UserId = PlayerToRemove->GetPlatformUserId();
+
+	// Removal destroys the player controller, which runs the regular logout
+	// path; the engine unregisters the player from any live session there.
+	if (!GameInstance->RemoveLocalPlayer(PlayerToRemove))
+	{
+		UE_LOG(LogUnrealSplit, Error, TEXT("RemoveLocalCoopPlayer failed: the engine refused to remove local player %d."), NumLocalPlayers - 1);
+		return false;
+	}
+
+	UE_LOG(LogUnrealSplit, Log, TEXT("Local co-op player removed: PlatformUser=%d released, %d local player(s) remain."),
+		UserId.GetInternalId(), GameInstance->GetNumLocalPlayers());
+
+	return true;
 }
 
 void UUSSessionSubsystem::AbortSession(const FString& Reason)
@@ -549,6 +839,114 @@ void UUSSessionSubsystem::DestroyLeftoverSession(const FString& Context)
 		}));
 }
 
+void UUSSessionSubsystem::HandleGameModePostLogin(AGameModeBase* GameMode, APlayerController* NewPlayer)
+{
+	// The event is global and PIE runs several game instances side by side.
+	if (GameMode == nullptr || NewPlayer == nullptr || GameMode->GetGameInstance() != GetGameInstance())
+	{
+		return;
+	}
+
+	const APlayerState* PlayerState = NewPlayer->PlayerState;
+	if (PlayerState == nullptr)
+	{
+		return;
+	}
+
+	TryRegisterPlayerInSession(PlayerState->GetUniqueId(),
+		NewPlayer->IsLocalController() ? TEXT("a local login") : TEXT("a remote login"));
+}
+
+void UUSSessionSubsystem::RegisterLocalPlayersWithSession(const FString& Context)
+{
+	const UGameInstance* GameInstance = GetGameInstance();
+	for (const ULocalPlayer* LocalPlayer : GameInstance->GetLocalPlayers())
+	{
+		if (LocalPlayer != nullptr)
+		{
+			TryRegisterPlayerInSession(LocalPlayer->GetPreferredUniqueNetId(), Context);
+		}
+	}
+}
+
+void UUSSessionSubsystem::TryRegisterPlayerInSession(const FUniqueNetIdRepl& UniqueId, const FString& Context)
+{
+	const IOnlineSessionPtr Sessions = GetSessionInterface(GetGameInstance());
+	const FNamedOnlineSession* Session = Sessions.IsValid() ? Sessions->GetNamedSession(NAME_GameSession) : nullptr;
+	if (Session == nullptr)
+	{
+		// Pure couch co-op: no session, nothing to keep in sync.
+		return;
+	}
+
+	if (!UniqueId.IsValid())
+	{
+		UE_LOG(LogUnrealSplit, Warning, TEXT("Cannot register a player from %s: no valid unique net id. Check the identity setup of the active online backend."), *Context);
+		return;
+	}
+
+	const FUniqueNetIdPtr PlayerId = UniqueId.GetUniqueNetId();
+
+	// The engine registers players itself whenever its timing works out (see
+	// APlayerState::RegisterPlayerWithSession); this only fills the gap it
+	// leaves when the login ran before the world switched to a networked mode.
+	const bool bAlreadyRegistered = Session->RegisteredPlayers.ContainsByPredicate(
+		[&PlayerId](const FUniqueNetIdRef& Registered)
+		{
+			return *Registered == *PlayerId;
+		});
+	if (bAlreadyRegistered)
+	{
+		return;
+	}
+
+	EnsureRegisterPlayersDelegate();
+
+	if (Sessions->RegisterPlayer(NAME_GameSession, *PlayerId, /*bWasInvited*/ false))
+	{
+		// Accepted, not finished: the outcome arrives on OnRegisterPlayersComplete.
+		UE_LOG(LogUnrealSplit, Log, TEXT("Registering player '%s' in the session (%s)."), *UniqueId.ToDebugString(), *Context);
+	}
+	else
+	{
+		UE_LOG(LogUnrealSplit, Warning, TEXT("The backend refused to register player '%s' in the session (%s)."), *UniqueId.ToDebugString(), *Context);
+	}
+}
+
+void UUSSessionSubsystem::EnsureRegisterPlayersDelegate()
+{
+	if (RegisterPlayersCompleteHandle.IsValid())
+	{
+		return;
+	}
+
+	const IOnlineSessionPtr Sessions = GetSessionInterface(GetGameInstance());
+	if (!Sessions.IsValid())
+	{
+		return;
+	}
+
+	// Bound for the lifetime of the subsystem: it also reports the registrations
+	// the engine itself starts, which is exactly the coverage we want.
+	RegisterPlayersCompleteHandle = Sessions->AddOnRegisterPlayersCompleteDelegate_Handle(
+		FOnRegisterPlayersCompleteDelegate::CreateWeakLambda(this, [](FName SessionName, const TArray<FUniqueNetIdRef>& PlayerIds, bool bWasSuccessful)
+		{
+			if (SessionName != FName(NAME_GameSession))
+			{
+				return;
+			}
+
+			if (bWasSuccessful)
+			{
+				UE_LOG(LogUnrealSplit, Log, TEXT("Session registration confirmed for %d player(s)."), PlayerIds.Num());
+			}
+			else
+			{
+				UE_LOG(LogUnrealSplit, Warning, TEXT("Session registration failed for %d player(s); the session's open slots and membership no longer match the players in the game."), PlayerIds.Num());
+			}
+		}));
+}
+
 void UUSSessionSubsystem::ReturnToEntryMap()
 {
 	UGameInstance* GameInstance = GetGameInstance();
@@ -627,12 +1025,44 @@ void UUSSessionSubsystem::ClearDestroySessionDelegate()
 	DestroySessionCompleteHandle.Reset();
 }
 
+void UUSSessionSubsystem::ClearRegisterPlayersDelegate()
+{
+	if (!RegisterPlayersCompleteHandle.IsValid())
+	{
+		return;
+	}
+
+	if (const IOnlineSessionPtr Sessions = GetSessionInterface(GetGameInstance()))
+	{
+		Sessions->ClearOnRegisterPlayersCompleteDelegate_Handle(RegisterPlayersCompleteHandle);
+	}
+	RegisterPlayersCompleteHandle.Reset();
+}
+
+void UUSSessionSubsystem::ClearLoginDelegate()
+{
+	if (!LoginCompleteHandle.IsValid())
+	{
+		return;
+	}
+
+	const IOnlineIdentityPtr Identity = GetIdentityInterface(GetGameInstance());
+	if (Identity.IsValid() && PendingLoginLocalUserIndex != INDEX_NONE)
+	{
+		// Takes the handle by reference and resets it.
+		Identity->ClearOnLoginCompleteDelegate_Handle(PendingLoginLocalUserIndex, LoginCompleteHandle);
+	}
+	LoginCompleteHandle.Reset();
+}
+
 void UUSSessionSubsystem::ClearSessionDelegates()
 {
 	ClearCreateSessionDelegate();
 	ClearFindSessionsDelegate();
 	ClearJoinSessionDelegate();
 	ClearDestroySessionDelegate();
+	ClearRegisterPlayersDelegate();
+	ClearLoginDelegate();
 }
 
 void UUSSessionSubsystem::SetSessionState(EUSSessionState NewState)
