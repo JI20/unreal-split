@@ -14,55 +14,22 @@
 #include "OnlineSubsystemUtils.h"
 #include "UObject/Class.h"
 
+#include "USConsoleReport.h"
 #include "USSessionSubsystem.h"
-#include "UnrealSplitModule.h"
 
 // Development-only driver for the session layer until real menu UI exists.
 // The console is compiled out of shipping builds, so these go with it.
 #if !UE_BUILD_SHIPPING
 
-namespace
-{
-	/**
-	 * Answers through the command's output device *and* the log. The in-game
-	 * console only echoes log lines that pass con.MinLogVerbosity — nothing, by
-	 * default — so without the output device these answers are invisible unless
-	 * the game was launched with -log, while the log is what survives the
-	 * session. Asynchronous outcomes arrive long after the command returned and
-	 * cannot use this; they stay log-only.
-	 */
-	void Report(FOutputDevice& Ar, const FString& Message)
-	{
-		Ar.Log(Message);
-		UE_LOG(LogUnrealSplit, Log, TEXT("%s"), *Message);
-	}
-
-	void ReportWarning(FOutputDevice& Ar, const FString& Message)
-	{
-		Ar.Log(ELogVerbosity::Warning, Message);
-		UE_LOG(LogUnrealSplit, Warning, TEXT("%s"), *Message);
-	}
-
-	UUSSessionSubsystem* FindSessionSubsystem(UWorld* World, FOutputDevice& Ar)
-	{
-		UGameInstance* GameInstance = World ? World->GetGameInstance() : nullptr;
-		UUSSessionSubsystem* Subsystem = GameInstance ? GameInstance->GetSubsystem<UUSSessionSubsystem>() : nullptr;
-
-		if (Subsystem == nullptr)
-		{
-			ReportWarning(Ar, TEXT("No UnrealSplit session subsystem in this world. Run this from a running game or PIE session."));
-		}
-
-		return Subsystem;
-	}
-}
+using USConsole::Report;
+using USConsole::ReportWarning;
 
 static FAutoConsoleCommandWithWorldArgsAndOutputDevice GUSHostCommand(
 	TEXT("US.Host"),
 	TEXT("UnrealSplit: create a session and reopen the current level as a listen server. Usage: US.Host [MaxPlayers] (defaults to 2). Counts every player in the game, local and remote, and is clamped to the game's total player cap."),
 	FConsoleCommandWithWorldArgsAndOutputDeviceDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World, FOutputDevice& Ar)
 	{
-		if (UUSSessionSubsystem* Sessions = FindSessionSubsystem(World, Ar))
+		if (UUSSessionSubsystem* Sessions = USConsole::FindSubsystem<UUSSessionSubsystem>(World, Ar))
 		{
 			const int32 MaxPlayers = Args.Num() > 0 ? FCString::Atoi(*Args[0]) : 2;
 			Report(Ar, FString::Printf(TEXT("US.Host: creating a session for up to %d player(s); the outcome follows in the log."), MaxPlayers));
@@ -75,7 +42,7 @@ static FAutoConsoleCommandWithWorldArgsAndOutputDevice GUSFindCommand(
 	TEXT("UnrealSplit: search for joinable sessions. Run US.SessionState afterwards to list what was found."),
 	FConsoleCommandWithWorldArgsAndOutputDeviceDelegate::CreateLambda([](const TArray<FString>& /*Args*/, UWorld* World, FOutputDevice& Ar)
 	{
-		if (UUSSessionSubsystem* Sessions = FindSessionSubsystem(World, Ar))
+		if (UUSSessionSubsystem* Sessions = USConsole::FindSubsystem<UUSSessionSubsystem>(World, Ar))
 		{
 			Report(Ar, TEXT("US.Find: searching; results are logged on completion and listed by US.SessionState."));
 			Sessions->FindSessions();
@@ -87,7 +54,7 @@ static FAutoConsoleCommandWithWorldArgsAndOutputDevice GUSJoinCommand(
 	TEXT("UnrealSplit: join a session found by US.Find. Usage: US.Join [Index] (defaults to 0)."),
 	FConsoleCommandWithWorldArgsAndOutputDeviceDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World, FOutputDevice& Ar)
 	{
-		if (UUSSessionSubsystem* Sessions = FindSessionSubsystem(World, Ar))
+		if (UUSSessionSubsystem* Sessions = USConsole::FindSubsystem<UUSSessionSubsystem>(World, Ar))
 		{
 			const int32 Index = Args.Num() > 0 ? FCString::Atoi(*Args[0]) : 0;
 			Report(Ar, FString::Printf(TEXT("US.Join: joining search result %d; the outcome follows in the log."), Index));
@@ -100,7 +67,7 @@ static FAutoConsoleCommandWithWorldArgsAndOutputDevice GUSLeaveCommand(
 	TEXT("UnrealSplit: destroy the current session and return to the entry map."),
 	FConsoleCommandWithWorldArgsAndOutputDeviceDelegate::CreateLambda([](const TArray<FString>& /*Args*/, UWorld* World, FOutputDevice& Ar)
 	{
-		if (UUSSessionSubsystem* Sessions = FindSessionSubsystem(World, Ar))
+		if (UUSSessionSubsystem* Sessions = USConsole::FindSubsystem<UUSSessionSubsystem>(World, Ar))
 		{
 			Report(Ar, TEXT("US.Leave: destroying the session and returning to the entry map."));
 			Sessions->LeaveSession();
@@ -112,7 +79,7 @@ static FAutoConsoleCommandWithWorldArgsAndOutputDevice GUSAddLocalPlayerCommand(
 	TEXT("UnrealSplit: add a couch co-op player on this machine (vertical splitscreen). On a joined client this asks the host for a split join, which needs a free public connection there."),
 	FConsoleCommandWithWorldArgsAndOutputDeviceDelegate::CreateLambda([](const TArray<FString>& /*Args*/, UWorld* World, FOutputDevice& Ar)
 	{
-		if (UUSSessionSubsystem* Sessions = FindSessionSubsystem(World, Ar))
+		if (UUSSessionSubsystem* Sessions = USConsole::FindSubsystem<UUSSessionSubsystem>(World, Ar))
 		{
 			const bool bAdded = Sessions->AddLocalCoopPlayer();
 			const int32 NumLocalPlayers = World->GetGameInstance()->GetNumLocalPlayers();
@@ -134,7 +101,7 @@ static FAutoConsoleCommandWithWorldArgsAndOutputDevice GUSRemoveLocalPlayerComma
 	TEXT("UnrealSplit: remove the most recently added couch co-op player."),
 	FConsoleCommandWithWorldArgsAndOutputDeviceDelegate::CreateLambda([](const TArray<FString>& /*Args*/, UWorld* World, FOutputDevice& Ar)
 	{
-		if (UUSSessionSubsystem* Sessions = FindSessionSubsystem(World, Ar))
+		if (UUSSessionSubsystem* Sessions = USConsole::FindSubsystem<UUSSessionSubsystem>(World, Ar))
 		{
 			const bool bRemoved = Sessions->RemoveLocalCoopPlayer();
 			const int32 NumLocalPlayers = World->GetGameInstance()->GetNumLocalPlayers();
@@ -155,7 +122,7 @@ static FAutoConsoleCommandWithWorldArgsAndOutputDevice GUSSessionStateCommand(
 	TEXT("UnrealSplit: report session state, the online backend in use, this machine's local players and the cached search results."),
 	FConsoleCommandWithWorldArgsAndOutputDeviceDelegate::CreateLambda([](const TArray<FString>& /*Args*/, UWorld* World, FOutputDevice& Ar)
 	{
-		const UUSSessionSubsystem* Sessions = FindSessionSubsystem(World, Ar);
+		const UUSSessionSubsystem* Sessions = USConsole::FindSubsystem<UUSSessionSubsystem>(World, Ar);
 		if (Sessions == nullptr)
 		{
 			return;
