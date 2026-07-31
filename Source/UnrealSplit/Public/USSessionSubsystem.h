@@ -12,6 +12,7 @@
 class AGameModeBase;
 class APlayerController;
 class FOnlineSessionSearch;
+class FOnlineSessionSettings;
 struct FUniqueNetIdRepl;
 class UNetDriver;
 class UWorld;
@@ -42,16 +43,18 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FUSOnBackendReady, bool, bReady);
  * is still open; it is selected by the comparison spike in plan step 1.6.
  *
  * Backend-agnostic by construction: everything goes through the generic
- * IOnlineSession interface, and no Online Subsystem type appears in this header.
- * Which backend a session uses is chosen at runtime by SetConnectionMode and
- * resolved by name, never through the process-wide default platform service:
- * the engine's own API for changing that default is documented editor-only. Two
- * consequences follow. Engine code that reaches for the default subsystem on its
- * own — most visibly APlayerState::RegisterPlayerWithSession — always talks to
- * the configured default, so on the other mode it finds no session and does
- * nothing, which is why this subsystem's own registration is load-bearing rather
- * than a gap-filler. And the mode is fixed while a session exists: it may only
- * change at Idle.
+ * IOnlineSession interface of the process-default online subsystem, and no
+ * Online Subsystem type appears in this header. Which backend that is, is not a
+ * runtime choice — UnrealSplitStartup selects it once from -ConnectionMode=
+ * before the engine reads it — so EUSConnectionMode is a read-only fact about how
+ * this process was launched, and every call here is a plain default-subsystem
+ * call. Two things follow from the default being the active backend. Local
+ * players' net ids are natively the type that backend expects, because
+ * ULocalPlayer mints them from the default subsystem; the plugin therefore needs
+ * no id translation anywhere. And engine code that reaches for the default on its
+ * own — most visibly APlayerState::RegisterPlayerWithSession — talks to the same
+ * session this subsystem does, so its registration and this one's agree instead
+ * of one of them quietly doing nothing.
  *
  * Every session entry point is guarded by EUSSessionState and always resolves
  * its delegate — a rejected call broadcasts failure rather than leaving a caller
@@ -72,34 +75,17 @@ public:
 	//~ End USubsystem interface
 
 	/**
-	 * Chooses how players will reach each other, which backend the session layer
-	 * talks to, and which net driver a following travel uses.
-	 *
-	 * Refused unless the state is Idle: the backend must not change under a live
-	 * session, and a net driver is picked at travel time from the definition this
-	 * writes. Also refused when the mode's backend is not installed in this build,
-	 * because silently continuing on the other one would look like the mode
-	 * switch worked.
-	 *
-	 * When the new mode requires a login, one is started immediately and
-	 * OnBackendReadyDelegate reports the outcome; hosting or searching before that
-	 * resolves is refused.
-	 *
-	 * @return Whether the mode is now the requested one, including when it
-	 *   already was. A true return says nothing about the login.
+	 * How players reach each other in this process, fixed at launch. Local co-op
+	 * works under either mode, so this says nothing about whether a session exists.
 	 */
-	UFUNCTION(BlueprintCallable, Category = "UnrealSplit|Session")
-	bool SetConnectionMode(EUSConnectionMode NewMode);
-
-	/** Mode the next host or join will use. */
 	UFUNCTION(BlueprintPure, Category = "UnrealSplit|Session")
 	EUSConnectionMode GetConnectionMode() const { return ConnectionMode; }
 
-	/** Online subsystem the current mode resolves to, e.g. for a status line. */
+	/** Online subsystem this process runs on, e.g. for a status line. */
 	UFUNCTION(BlueprintPure, Category = "UnrealSplit|Session")
-	FName GetActiveBackendName() const;
+	FName GetBackendName() const;
 
-	/** Whether that backend exists in this build; false means the mode is unusable. */
+	/** Whether that backend came up at all; false means no session can be hosted or joined. */
 	UFUNCTION(BlueprintPure, Category = "UnrealSplit|Session")
 	bool IsBackendInstalled() const;
 
@@ -111,9 +97,43 @@ public:
 	bool IsBackendReady() const;
 
 	/**
-	 * Logs the primary user into the current mode's backend. Called by
-	 * SetConnectionMode already; exposed for a menu that wants a retry button
-	 * after a failed login.
+	 * The same answer with the reason attached. Worth reading instead of
+	 * IsBackendReady wherever a failure is reported to a person: an unsigned-in
+	 * process searches and finds nothing, which looks exactly like a search that
+	 * worked and came back empty, and the two need completely different fixes.
+	 */
+	UFUNCTION(BlueprintPure, Category = "UnrealSplit|Session")
+	EUSBackendStatus GetBackendStatus() const;
+
+	/**
+	 * Whether sessions in this mode are advertised as lobbies rather than as
+	 * sessions proper. Both host and search read it, which is the point: on a
+	 * hosted service the two are separate registries, and a host in one is
+	 * invisible to a search of the other.
+	 */
+	UFUNCTION(BlueprintPure, Category = "UnrealSplit|Session")
+	bool DoesModeUseLobbies() const;
+
+	/**
+	 * Key the backend files this game's sessions under. Both host and search
+	 * send it and a hosted service only ever matches within one bucket, so a
+	 * host and a searcher that disagree about it never see each other.
+	 */
+	UFUNCTION(BlueprintPure, Category = "UnrealSplit|Session")
+	FString GetSessionBucketId() const;
+
+	/**
+	 * Both discovery keys on one line, in the same wording the host and search
+	 * logs use. What a status readout should show, and what two processes are
+	 * compared by when one cannot see the other.
+	 */
+	UFUNCTION(BlueprintPure, Category = "UnrealSplit|Session")
+	FString DescribeDiscoveryKeys() const;
+
+	/**
+	 * Logs the primary user into the backend. Started on the first session call
+	 * that needs it already; exposed for a menu that wants a retry button after a
+	 * failed login.
 	 * @return Whether a login was started or was unnecessary. The outcome arrives
 	 *   through OnBackendReadyDelegate.
 	 */
@@ -133,6 +153,11 @@ public:
 	/**
 	 * Searches for joinable sessions. Results are cached on the subsystem and
 	 * reported through OnSessionsFoundDelegate; read them with GetFoundSessions.
+	 *
+	 * A refused search reports zero results just like a search that found
+	 * nothing, so anything that shows the outcome to a person must read
+	 * GetBackendStatus() as well and say "not signed in" when that is what
+	 * happened. The log always distinguishes the two.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "UnrealSplit|Session")
 	void FindSessions();
@@ -215,20 +240,6 @@ public:
 	FUSOnBackendReady OnBackendReadyDelegate;
 
 protected:
-	/** Mode a fresh game instance starts in, before any menu choice. */
-	UPROPERTY(Config)
-	EUSConnectionMode DefaultConnectionMode = EUSConnectionMode::LAN;
-
-	/**
-	 * Online subsystems the two modes resolve to. Named in config so the plugin
-	 * never mentions a backend: point them at anything installed in the build.
-	 */
-	UPROPERTY(Config)
-	FName LanSubsystemName = TEXT("NULL");
-
-	UPROPERTY(Config)
-	FName InternetSubsystemName = TEXT("EOS");
-
 	/**
 	 * Whether a mode needs a logged-in user before session calls. LAN backends
 	 * generally do not; hosted services do, and their net driver needs the login
@@ -242,26 +253,14 @@ protected:
 	bool bInternetRequiresLogin = true;
 
 	/**
-	 * Net driver class each mode installs into the GameNetDriver definition
-	 * before travel. Set explicitly per mode rather than left to the engine's
-	 * fallback: with an internet backend installed, its driver can report itself
-	 * as available while a LAN game is being played, and the fallback would then
-	 * never run.
-	 */
-	UPROPERTY(Config)
-	FName LanNetDriverClassName = TEXT("/Script/OnlineSubsystemUtils.IpNetDriver");
-
-	UPROPERTY(Config)
-	FName InternetNetDriverClassName = TEXT("/Script/SocketSubsystemEOS.NetDriverEOS");
-
-	/** Used when a mode's driver class fails to load or initialise. */
-	UPROPERTY(Config)
-	FName NetDriverFallbackClassName = TEXT("/Script/OnlineSubsystemUtils.IpNetDriver");
-
-	/**
 	 * Advertise internet sessions as lobbies where the backend supports them.
 	 * Lobbies are how most hosted services let a client join without a routable
 	 * host address; LAN never uses them.
+	 *
+	 * Read by the host *and* by the search, and it has to stay that way. A
+	 * hosted service keeps lobbies and sessions in separate registries and
+	 * answers a query of the wrong one with an empty list rather than an error,
+	 * so two processes configured differently here simply never see each other.
 	 */
 	UPROPERTY(Config)
 	bool bInternetUsesLobbies = true;
@@ -347,17 +346,24 @@ private:
 	/** Creates the local player for an already logged-in platform user. */
 	bool CreateLocalCoopPlayerForUser(FPlatformUserId UserId);
 
-	/** Online subsystem a mode resolves to, without having to be in that mode. */
-	FName GetBackendNameForMode(EUSConnectionMode Mode) const;
-
-	/** Whether a named online subsystem exists in this build. */
-	bool IsBackendNameInstalled(FName SubsystemName) const;
-
 	/** Whether the current mode may not touch the backend before a login. */
 	bool DoesModeRequireLogin() const;
 
 	/** True when discovery should stay on the local network. */
 	bool IsLanMatch() const;
+
+	/**
+	 * Stamps the keys a backend matches a search against onto the host's settings
+	 * and onto the search, from the same two answers on both sides.
+	 *
+	 * Deliberately one function per side of the same decision rather than two
+	 * independent ones: session kind and bucket only work if host and searcher
+	 * agree on them, and a hosted service reports a disagreement as an empty
+	 * result rather than as an error. Keeping them here is what stops the two
+	 * from drifting apart.
+	 */
+	void ApplyDiscoveryKeys(FOnlineSessionSettings& Settings) const;
+	void ApplyDiscoveryKeys(FOnlineSessionSearch& Search) const;
 
 	/**
 	 * Common guard for the session entry points: reports whether the backend can
@@ -370,13 +376,6 @@ private:
 	void OnBackendLoginFinished(int32 LocalUserIndex, bool bWasSuccessful, const FString& ErrorString);
 
 	void ClearBackendLoginDelegate();
-
-	/**
-	 * Points the engine's GameNetDriver definition at the current mode's driver.
-	 * Safe because the mode only changes at Idle and drivers are created per
-	 * travel, so no live connection can be using the definition being rewritten.
-	 */
-	void ApplyNetDriverForMode();
 
 	/**
 	 * Players currently in the game as this machine can see them: everyone on the
@@ -409,7 +408,11 @@ private:
 
 	EUSSessionState SessionState = EUSSessionState::Idle;
 
-	/** Backend the session layer currently talks to; set from DefaultConnectionMode. */
+	/**
+	 * How this process was launched, read once in Initialize from the backend
+	 * UnrealSplitStartup selected. Never written again: changing it would not
+	 * change the backend, which is fixed for the life of the process.
+	 */
 	EUSConnectionMode ConnectionMode = EUSConnectionMode::LAN;
 
 	/** True while the primary user's login into that backend is in flight. */

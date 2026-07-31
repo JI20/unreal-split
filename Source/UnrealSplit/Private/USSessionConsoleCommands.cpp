@@ -29,12 +29,29 @@ static FAutoConsoleCommandWithWorldArgsAndOutputDevice GUSHostCommand(
 	TEXT("UnrealSplit: create a session and reopen the current level as a listen server. Usage: US.Host [MaxPlayers] (defaults to 2). Counts every player in the game, local and remote, and is clamped to the game's total player cap."),
 	FConsoleCommandWithWorldArgsAndOutputDeviceDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World, FOutputDevice& Ar)
 	{
-		if (UUSSessionSubsystem* Sessions = USConsole::FindSubsystem<UUSSessionSubsystem>(World, Ar))
+		UUSSessionSubsystem* Sessions = USConsole::FindSubsystem<UUSSessionSubsystem>(World, Ar);
+		if (Sessions == nullptr)
 		{
-			const int32 MaxPlayers = Args.Num() > 0 ? FCString::Atoi(*Args[0]) : 2;
-			Report(Ar, FString::Printf(TEXT("US.Host: creating a session for up to %d player(s); the outcome follows in the log."), MaxPlayers));
-			Sessions->HostSession(MaxPlayers);
+			return;
 		}
+
+		// Same reason as US.Find: a host that was never created is what the other
+		// machine later experiences as "no sessions found", one process away from
+		// where the problem actually is.
+		const EUSBackendStatus Status = Sessions->GetBackendStatus();
+		if (Status != EUSBackendStatus::Ready)
+		{
+			ReportWarning(Ar, FString::Printf(TEXT("US.Host: NOT HOSTING. Backend '%s' is %s. Sign in first (US.Login), then US.Host again."),
+				*Sessions->GetBackendName().ToString(), *UEnum::GetValueAsString(Status)));
+
+			Sessions->LoginToBackend();
+			return;
+		}
+
+		const int32 MaxPlayers = Args.Num() > 0 ? FCString::Atoi(*Args[0]) : 2;
+		Report(Ar, FString::Printf(TEXT("US.Host: creating a session for up to %d player(s) on '%s' (%s); the outcome follows in the log."),
+			MaxPlayers, *Sessions->GetBackendName().ToString(), *Sessions->DescribeDiscoveryKeys()));
+		Sessions->HostSession(MaxPlayers);
 	}));
 
 static FAutoConsoleCommandWithWorldArgsAndOutputDevice GUSFindCommand(
@@ -42,11 +59,35 @@ static FAutoConsoleCommandWithWorldArgsAndOutputDevice GUSFindCommand(
 	TEXT("UnrealSplit: search for joinable sessions. Run US.SessionState afterwards to list what was found."),
 	FConsoleCommandWithWorldArgsAndOutputDeviceDelegate::CreateLambda([](const TArray<FString>& /*Args*/, UWorld* World, FOutputDevice& Ar)
 	{
-		if (UUSSessionSubsystem* Sessions = USConsole::FindSubsystem<UUSSessionSubsystem>(World, Ar))
+		UUSSessionSubsystem* Sessions = USConsole::FindSubsystem<UUSSessionSubsystem>(World, Ar);
+		if (Sessions == nullptr)
 		{
-			Report(Ar, TEXT("US.Find: searching; results are logged on completion and listed by US.SessionState."));
-			Sessions->FindSessions();
+			return;
 		}
+
+		// Answered before the search rather than after it, because a search that
+		// never ran and a search that found nothing both end in an empty list.
+		// The subsystem would refuse this anyway; saying so here is what puts the
+		// reason on screen next to the command that asked for it.
+		const EUSBackendStatus Status = Sessions->GetBackendStatus();
+		if (Status != EUSBackendStatus::Ready)
+		{
+			ReportWarning(Ar, FString::Printf(TEXT("US.Find: NOT SEARCHING. Backend '%s' is %s, so no search ran at all. This is not an empty result. %s"),
+				*Sessions->GetBackendName().ToString(),
+				*UEnum::GetValueAsString(Status),
+				Status == EUSBackendStatus::NotInstalled
+					? TEXT("No online subsystem came up for this process's mode.")
+					: TEXT("Sign in first: US.Login, then US.Find again. On EOS the account must be served by the Developer Authentication Tool and belong to the organisation that owns the application.")));
+
+			// Started rather than merely suggested, so the retry has something to
+			// wait for; the outcome lands in the log.
+			Sessions->LoginToBackend();
+			return;
+		}
+
+		Report(Ar, FString::Printf(TEXT("US.Find: searching on '%s' (%s); results are logged on completion and listed by US.SessionState."),
+			*Sessions->GetBackendName().ToString(), *Sessions->DescribeDiscoveryKeys()));
+		Sessions->FindSessions();
 	}));
 
 static FAutoConsoleCommandWithWorldArgsAndOutputDevice GUSJoinCommand(
@@ -117,55 +158,9 @@ static FAutoConsoleCommandWithWorldArgsAndOutputDevice GUSRemoveLocalPlayerComma
 		}
 	}));
 
-static FAutoConsoleCommandWithWorldArgsAndOutputDevice GUSConnectionModeCommand(
-	TEXT("US.ConnectionMode"),
-	TEXT("UnrealSplit: show or change how players connect. Usage: US.ConnectionMode [LAN|Internet]. Without an argument it only reports. Only allowed while idle, and it starts the backend login the new mode needs."),
-	FConsoleCommandWithWorldArgsAndOutputDeviceDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World, FOutputDevice& Ar)
-	{
-		UUSSessionSubsystem* Sessions = USConsole::FindSubsystem<UUSSessionSubsystem>(World, Ar);
-		if (Sessions == nullptr)
-		{
-			return;
-		}
-
-		if (Args.Num() == 0)
-		{
-			Report(Ar, FString::Printf(TEXT("US.ConnectionMode: %s, backend '%s' (%s, %s)."),
-				*UEnum::GetValueAsString(Sessions->GetConnectionMode()),
-				*Sessions->GetActiveBackendName().ToString(),
-				Sessions->IsBackendInstalled() ? TEXT("installed") : TEXT("NOT installed in this build"),
-				Sessions->IsBackendReady() ? TEXT("ready") : TEXT("no logged-in user yet")));
-			return;
-		}
-
-		EUSConnectionMode NewMode = EUSConnectionMode::LAN;
-		if (Args[0].Equals(TEXT("Internet"), ESearchCase::IgnoreCase))
-		{
-			NewMode = EUSConnectionMode::Internet;
-		}
-		else if (!Args[0].Equals(TEXT("LAN"), ESearchCase::IgnoreCase))
-		{
-			ReportWarning(Ar, FString::Printf(TEXT("US.ConnectionMode: '%s' is not a mode. Usage: US.ConnectionMode [LAN|Internet]."), *Args[0]));
-			return;
-		}
-
-		if (Sessions->SetConnectionMode(NewMode))
-		{
-			Report(Ar, FString::Printf(TEXT("US.ConnectionMode: now %s on backend '%s' (%s). A login that is still running reports in the log."),
-				*UEnum::GetValueAsString(Sessions->GetConnectionMode()),
-				*Sessions->GetActiveBackendName().ToString(),
-				Sessions->IsBackendReady() ? TEXT("ready") : TEXT("waiting for login")));
-		}
-		else
-		{
-			// The subsystem's own line says whether it was the state or the backend.
-			ReportWarning(Ar, FString::Printf(TEXT("US.ConnectionMode: refused; still %s."), *UEnum::GetValueAsString(Sessions->GetConnectionMode())));
-		}
-	}));
-
 static FAutoConsoleCommandWithWorldArgsAndOutputDevice GUSLoginCommand(
 	TEXT("US.Login"),
-	TEXT("UnrealSplit: log the primary user into the current mode's backend. Only needed as a retry: changing mode already does it, and LAN backends generally need no login at all."),
+	TEXT("UnrealSplit: log the primary user into this process's backend. Only needed as a retry: the first session call that needs a login starts one, and LAN backends generally need no login at all."),
 	FConsoleCommandWithWorldArgsAndOutputDeviceDelegate::CreateLambda([](const TArray<FString>& /*Args*/, UWorld* World, FOutputDevice& Ar)
 	{
 		UUSSessionSubsystem* Sessions = USConsole::FindSubsystem<UUSSessionSubsystem>(World, Ar);
@@ -176,23 +171,23 @@ static FAutoConsoleCommandWithWorldArgsAndOutputDevice GUSLoginCommand(
 
 		if (Sessions->IsBackendReady())
 		{
-			Report(Ar, FString::Printf(TEXT("US.Login: backend '%s' is already usable; nothing to do."), *Sessions->GetActiveBackendName().ToString()));
+			Report(Ar, FString::Printf(TEXT("US.Login: backend '%s' is already usable; nothing to do."), *Sessions->GetBackendName().ToString()));
 			return;
 		}
 
 		if (Sessions->LoginToBackend())
 		{
-			Report(Ar, FString::Printf(TEXT("US.Login: logging in to '%s'; the outcome follows in the log."), *Sessions->GetActiveBackendName().ToString()));
+			Report(Ar, FString::Printf(TEXT("US.Login: logging in to '%s'; the outcome follows in the log."), *Sessions->GetBackendName().ToString()));
 		}
 		else
 		{
-			ReportWarning(Ar, FString::Printf(TEXT("US.Login: could not start a login on '%s'."), *Sessions->GetActiveBackendName().ToString()));
+			ReportWarning(Ar, FString::Printf(TEXT("US.Login: could not start a login on '%s'."), *Sessions->GetBackendName().ToString()));
 		}
 	}));
 
 static FAutoConsoleCommandWithWorldArgsAndOutputDevice GUSSessionStateCommand(
 	TEXT("US.SessionState"),
-	TEXT("UnrealSplit: report session state, the online backend in use, this machine's local players and the cached search results."),
+	TEXT("UnrealSplit: report session state, the connection mode and backend this process was launched on, this machine's local players and the cached search results."),
 	FConsoleCommandWithWorldArgsAndOutputDeviceDelegate::CreateLambda([](const TArray<FString>& /*Args*/, UWorld* World, FOutputDevice& Ar)
 	{
 		const UUSSessionSubsystem* Sessions = USConsole::FindSubsystem<UUSSessionSubsystem>(World, Ar);
@@ -201,39 +196,51 @@ static FAutoConsoleCommandWithWorldArgsAndOutputDevice GUSSessionStateCommand(
 			return;
 		}
 
-		// Naming the backend rather than leaving it to be inferred: with two of
-		// them installed, "which one am I actually talking to" is otherwise only
-		// answerable from the startup log. The instance name distinguishes PIE
-		// worlds, which each get their own.
-		const FName BackendName = Sessions->GetActiveBackendName();
-		const IOnlineSubsystem* Backend = Online::GetSubsystem(World, BackendName);
-		const IOnlineSessionPtr SessionInterface = Online::GetSessionInterface(World, BackendName);
+		// The mode and the backend together, because the mode is only a name for
+		// which backend the process was launched on: it is fixed at startup by
+		// -ConnectionMode= and there is no way to change it from here. The
+		// instance name distinguishes PIE worlds, which each get their own.
+		const IOnlineSubsystem* Backend = Online::GetSubsystem(World);
+		const IOnlineSessionPtr SessionInterface = Online::GetSessionInterface(World);
 
-		Report(Ar, FString::Printf(TEXT("US.SessionState: State=%s Mode=%s Backend=%s Instance=%s SessionInterface=%s Ready=%s"),
+		Report(Ar, FString::Printf(TEXT("US.SessionState: State=%s Mode=%s (fixed at launch) Backend=%s Instance=%s SessionInterface=%s Status=%s"),
 			*UEnum::GetValueAsString(Sessions->GetSessionState()),
 			*UEnum::GetValueAsString(Sessions->GetConnectionMode()),
-			Backend != nullptr ? *Backend->GetSubsystemName().ToString() : *FString::Printf(TEXT("%s (not installed)"), *BackendName.ToString()),
+			Backend != nullptr ? *Backend->GetSubsystemName().ToString() : *FString::Printf(TEXT("%s (none came up)"), *Sessions->GetBackendName().ToString()),
 			Backend != nullptr ? *Backend->GetInstanceName().ToString() : TEXT("none"),
 			SessionInterface.IsValid() ? TEXT("yes") : TEXT("no"),
-			Sessions->IsBackendReady() ? TEXT("yes") : TEXT("no (login pending)")));
+			*UEnum::GetValueAsString(Sessions->GetBackendStatus())));
 
-		// The process default is a different thing from the selected backend and
-		// only engine-internal code uses it; worth showing side by side, because a
-		// mismatch is exactly what makes the engine's own player registration go
-		// to a backend with no session on it.
-		const IOnlineSubsystem* DefaultBackend = Online::GetSubsystem(World);
-		Report(Ar, FString::Printf(TEXT("  Process default backend: %s (engine-internal calls only)."),
-			DefaultBackend != nullptr ? *DefaultBackend->GetSubsystemName().ToString() : TEXT("none")));
+		// The keys a host and a searcher have to agree on, printed on both
+		// machines so a discovery failure is settled by comparing two lines
+		// rather than by reasoning about which side is at fault.
+		Report(Ar, FString::Printf(TEXT("  Discovery: %s"), *Sessions->DescribeDiscoveryKeys()));
 
 		const FNamedOnlineSession* Session = SessionInterface.IsValid() ? SessionInterface->GetNamedSession(NAME_GameSession) : nullptr;
 		if (Session != nullptr)
 		{
-			Report(Ar, FString::Printf(TEXT("  Session '%s': hosting=%s, %d registered player(s), %d of %d public connection(s) free."),
+			const FOnlineSessionSettings& Settings = Session->SessionSettings;
+
+			Report(Ar, FString::Printf(TEXT("  Session '%s' (%s): hosting=%s, %d registered player(s), %d of %d public connection(s) free."),
 				*FName(NAME_GameSession).ToString(),
+				EOnlineSessionState::ToString(Session->SessionState),
 				Session->bHosting ? TEXT("yes") : TEXT("no"),
 				Session->RegisteredPlayers.Num(),
 				Session->NumOpenPublicConnections,
-				Session->SessionSettings.NumPublicConnections));
+				Settings.NumPublicConnections));
+
+			// As the backend actually holds them, not as HostSession asked for
+			// them: the EOS layer rewrites some of these on create, and it is the
+			// rewritten values a searcher has to match.
+			Report(Ar, FString::Printf(TEXT("    Advertise=%d LANMatch=%d Lobbies=%d Presence=%d JoinInProgress=%d JoinViaPresence=%d BuildUniqueId=%d Id='%s'"),
+				Settings.bShouldAdvertise ? 1 : 0,
+				Settings.bIsLANMatch ? 1 : 0,
+				Settings.bUseLobbiesIfAvailable ? 1 : 0,
+				Settings.bUsesPresence ? 1 : 0,
+				Settings.bAllowJoinInProgress ? 1 : 0,
+				Settings.bAllowJoinViaPresence ? 1 : 0,
+				Settings.BuildUniqueId,
+				*Session->GetSessionIdStr()));
 		}
 		else
 		{
@@ -243,7 +250,7 @@ static FAutoConsoleCommandWithWorldArgsAndOutputDevice GUSSessionStateCommand(
 		// Login status per local player, because a player without an online
 		// identity can never be registered in the session, and that is invisible
 		// otherwise until registration silently skips it.
-		const IOnlineIdentityPtr Identity = Online::GetIdentityInterface(World, BackendName);
+		const IOnlineIdentityPtr Identity = Online::GetIdentityInterface(World);
 		const TArray<ULocalPlayer*>& LocalPlayers = World->GetGameInstance()->GetLocalPlayers();
 		Report(Ar, FString::Printf(TEXT("  %d local player(s) on this machine:"), LocalPlayers.Num()));
 
@@ -251,13 +258,19 @@ static FAutoConsoleCommandWithWorldArgsAndOutputDevice GUSSessionStateCommand(
 		{
 			const ULocalPlayer* LocalPlayer = LocalPlayers[Index];
 			const FUniqueNetIdRepl PlayerId = LocalPlayer != nullptr ? LocalPlayer->GetPreferredUniqueNetId() : FUniqueNetIdRepl();
-			const ELoginStatus::Type LoginStatus = (Identity.IsValid() && PlayerId.IsValid())
-				? Identity->GetLoginStatus(*PlayerId)
+
+			// Asked by user index rather than by id: the id overloads downcast
+			// their argument to the backend's own type, so a user index is the one
+			// question that cannot go wrong.
+			const int32 UserIndex = LocalPlayer != nullptr ? LocalPlayer->GetPlatformUserIndex() : INDEX_NONE;
+			const ELoginStatus::Type LoginStatus = (Identity.IsValid() && UserIndex >= 0)
+				? Identity->GetLoginStatus(UserIndex)
 				: ELoginStatus::NotLoggedIn;
 
-			Report(Ar, FString::Printf(TEXT("    [%d] PlatformUser=%d Login=%s Id='%s'"),
+			Report(Ar, FString::Printf(TEXT("    [%d] PlatformUser=%d UserIndex=%d Login=%s Id='%s'"),
 				Index,
 				LocalPlayer != nullptr ? LocalPlayer->GetPlatformUserId().GetInternalId() : INDEX_NONE,
+				UserIndex,
 				ELoginStatus::ToString(LoginStatus),
 				PlayerId.IsValid() ? *PlayerId.ToDebugString() : TEXT("invalid")));
 		}
@@ -267,8 +280,8 @@ static FAutoConsoleCommandWithWorldArgsAndOutputDevice GUSSessionStateCommand(
 
 		for (int32 Index = 0; Index < Found.Num(); ++Index)
 		{
-			Report(Ar, FString::Printf(TEXT("    [%d] Owner='%s' Ping=%dms Slots=%d/%d"),
-				Index, *Found[Index].OwnerName, Found[Index].PingInMs,
+			Report(Ar, FString::Printf(TEXT("    [%d] Id='%s' Owner='%s' Ping=%dms Slots=%d/%d"),
+				Index, *Found[Index].SessionId, *Found[Index].OwnerName, Found[Index].PingInMs,
 				Found[Index].OpenPublicConnections, Found[Index].MaxPublicConnections));
 		}
 	}));

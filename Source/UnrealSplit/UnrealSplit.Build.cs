@@ -30,7 +30,9 @@ public class UnrealSplit : ModuleRules
 				"EngineSettings",
 				"NetCore",
 				"OnlineSubsystem",
-				"OnlineSubsystemUtils"
+				"OnlineSubsystemUtils",
+				// The backend chosen at process start, resolved before the engine read it.
+				"UnrealSplitStartup"
 			}
 			);
 	}

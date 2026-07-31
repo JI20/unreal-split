@@ -16,6 +16,11 @@
 	"Installed": false,
 	"Modules": [
 		{
+			"Name": "UnrealSplitStartup",
+			"Type": "Runtime",
+			"LoadingPhase": "EarliestPossible"
+		},
+		{
 			"Name": "UnrealSplit",
 			"Type": "Runtime",
 			"LoadingPhase": "Default"
