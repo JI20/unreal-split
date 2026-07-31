@@ -38,6 +38,29 @@ enum class EUSSessionState : uint8
 };
 
 /**
+ * How players reach each other when a session is used.
+ *
+ * Exactly one mode is active at a time and it is chosen before anything is
+ * hosted or joined; there is never a game whose players arrived by different
+ * routes. Pure couch co-op is deliberately absent: it uses no session and no
+ * online backend at all, so it is the absence of this choice rather than a
+ * third value of it.
+ *
+ * Each mode names an online subsystem through config (UUSSessionSubsystem's
+ * LanSubsystemName / InternetSubsystemName), so no backend name ever appears in
+ * plugin code and swapping either one is an ini edit.
+ */
+UENUM(BlueprintType)
+enum class EUSConnectionMode : uint8
+{
+	/** Local network discovery, no accounts and no internet. */
+	LAN,
+
+	/** Internet play through a hosted online service. */
+	Internet
+};
+
+/**
  * Backend-agnostic view of one session search result.
  *
  * Deliberately free of any Online Subsystem types so UI and Blueprint can show

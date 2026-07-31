@@ -18,6 +18,7 @@
 #include "Kismet/GameplayStatics.h"
 #include "Misc/PackageName.h"
 #include "OnlineSessionSettings.h"
+#include "OnlineSubsystem.h"
 #include "OnlineSubsystemUtils.h"
 #include "UObject/Class.h"
 
@@ -34,18 +35,29 @@ namespace
 	/** Backends that honour a search timeout give up after this long. */
 	constexpr float SessionSearchTimeoutSeconds = 15.0f;
 
-	/** Resolves the session interface of whichever backend config selected. */
-	IOnlineSessionPtr GetSessionInterface(const UGameInstance* GameInstance)
+	/** The engine's net driver definition used for game connections. */
+	const FName GameNetDriverDefName = TEXT("GameNetDriver");
+
+	/**
+	 * Resolves the session interface of the backend the current mode selects.
+	 *
+	 * Named rather than default: both backends are installed in one build, and
+	 * the default is only what engine-internal code reaches for. Online::* does
+	 * the PIE instance-name juggling, which is why the world is required.
+	 */
+	IOnlineSessionPtr GetSessionInterface(const UUSSessionSubsystem* Subsystem)
 	{
+		const UGameInstance* GameInstance = Subsystem ? Subsystem->GetGameInstance() : nullptr;
 		const UWorld* World = GameInstance ? GameInstance->GetWorld() : nullptr;
-		return World ? Online::GetSessionInterface(World) : nullptr;
+		return World ? Online::GetSessionInterface(World, Subsystem->GetActiveBackendName()) : nullptr;
 	}
 
 	/** Identity interface of the same backend; missing on backends without one. */
-	IOnlineIdentityPtr GetIdentityInterface(const UGameInstance* GameInstance)
+	IOnlineIdentityPtr GetIdentityInterface(const UUSSessionSubsystem* Subsystem)
 	{
+		const UGameInstance* GameInstance = Subsystem ? Subsystem->GetGameInstance() : nullptr;
 		const UWorld* World = GameInstance ? GameInstance->GetWorld() : nullptr;
-		return World ? Online::GetIdentityInterface(World) : nullptr;
+		return World ? Online::GetIdentityInterface(World, Subsystem->GetActiveBackendName()) : nullptr;
 	}
 }
 
@@ -63,7 +75,14 @@ void UUSSessionSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	// game mode class the game uses.
 	PostLoginHandle = FGameModeEvents::GameModePostLoginEvent.AddUObject(this, &UUSSessionSubsystem::HandleGameModePostLogin);
 
-	UE_LOG(LogUnrealSplit, Log, TEXT("Session subsystem initialized. LANMatch=%d MaxTotalPlayers=%d"), bUseLANMatch ? 1 : 0, MaxTotalPlayers);
+	// No login here: there is no world yet, and resolving a backend without one
+	// would reach past PIE's per-instance subsystems. The mode's login happens on
+	// the first SetConnectionMode or session call.
+	ConnectionMode = DefaultConnectionMode;
+	ApplyNetDriverForMode();
+
+	UE_LOG(LogUnrealSplit, Log, TEXT("Session subsystem initialized. Mode=%s Backend=%s MaxTotalPlayers=%d"),
+		*UEnum::GetValueAsString(ConnectionMode), *GetActiveBackendName().ToString(), MaxTotalPlayers);
 }
 
 void UUSSessionSubsystem::Deinitialize()
@@ -83,6 +102,7 @@ void UUSSessionSubsystem::Deinitialize()
 
 	PendingLoginLocalUserIndex = INDEX_NONE;
 	PendingLoginPlatformUser = PLATFORMUSERID_NONE;
+	bBackendLoginInFlight = false;
 
 	SessionSearch.Reset();
 	FoundSessions.Reset();
@@ -90,6 +110,244 @@ void UUSSessionSubsystem::Deinitialize()
 	UE_LOG(LogUnrealSplit, Log, TEXT("Session subsystem deinitialized."));
 
 	Super::Deinitialize();
+}
+
+FName UUSSessionSubsystem::GetBackendNameForMode(EUSConnectionMode Mode) const
+{
+	return Mode == EUSConnectionMode::Internet ? InternetSubsystemName : LanSubsystemName;
+}
+
+FName UUSSessionSubsystem::GetActiveBackendName() const
+{
+	return GetBackendNameForMode(ConnectionMode);
+}
+
+bool UUSSessionSubsystem::IsLanMatch() const
+{
+	return ConnectionMode == EUSConnectionMode::LAN;
+}
+
+bool UUSSessionSubsystem::DoesModeRequireLogin() const
+{
+	return ConnectionMode == EUSConnectionMode::Internet ? bInternetRequiresLogin : bLanRequiresLogin;
+}
+
+bool UUSSessionSubsystem::IsBackendNameInstalled(FName SubsystemName) const
+{
+	const UGameInstance* GameInstance = GetGameInstance();
+	const UWorld* World = GameInstance ? GameInstance->GetWorld() : nullptr;
+
+	// Before a world exists only the config answer is available, and it is the
+	// one that matters: whether the module is enabled in this build.
+	return World != nullptr
+		? Online::GetSubsystem(World, SubsystemName) != nullptr
+		: IOnlineSubsystem::IsEnabled(SubsystemName);
+}
+
+bool UUSSessionSubsystem::IsBackendInstalled() const
+{
+	return IsBackendNameInstalled(GetActiveBackendName());
+}
+
+bool UUSSessionSubsystem::IsBackendReady() const
+{
+	if (!DoesModeRequireLogin())
+	{
+		return true;
+	}
+
+	const IOnlineIdentityPtr Identity = GetIdentityInterface(this);
+	if (!Identity.IsValid())
+	{
+		// A backend without identities cannot be logged into, so waiting for one
+		// would hang the mode forever.
+		return true;
+	}
+
+	return Identity->GetLoginStatus(SessionLocalUserNum) == ELoginStatus::LoggedIn;
+}
+
+bool UUSSessionSubsystem::SetConnectionMode(EUSConnectionMode NewMode)
+{
+	if (SessionState != EUSSessionState::Idle)
+	{
+		UE_LOG(LogUnrealSplit, Warning, TEXT("SetConnectionMode rejected: state is %s, expected Idle. Leave the session before changing how players connect."),
+			*UEnum::GetValueAsString(SessionState));
+		return false;
+	}
+
+	if (NewMode == ConnectionMode)
+	{
+		// Still worth a login attempt: the mode may never have had one.
+		if (!IsBackendReady())
+		{
+			LoginToBackend();
+		}
+		return true;
+	}
+
+	// Checked before the switch, so a refusal leaves nothing to undo.
+	const FName NewBackendName = GetBackendNameForMode(NewMode);
+	if (!IsBackendNameInstalled(NewBackendName))
+	{
+		UE_LOG(LogUnrealSplit, Error, TEXT("SetConnectionMode failed: mode %s needs the '%s' online subsystem, which is not enabled in this build. Staying on %s."),
+			*UEnum::GetValueAsString(NewMode), *NewBackendName.ToString(), *UEnum::GetValueAsString(ConnectionMode));
+		return false;
+	}
+
+	// Unbound while the old backend is still the active one: the handle lives on
+	// that backend's identity interface, and a login belonging to the mode being
+	// left must not report readiness for the new one.
+	ClearBackendLoginDelegate();
+	bBackendLoginInFlight = false;
+
+	const EUSConnectionMode PreviousMode = ConnectionMode;
+	ConnectionMode = NewMode;
+
+	// Cached results came from the other backend and cannot be joined on this one.
+	SessionSearch.Reset();
+	FoundSessions.Reset();
+
+	ApplyNetDriverForMode();
+
+	UE_LOG(LogUnrealSplit, Log, TEXT("Connection mode: %s -> %s (backend '%s')."),
+		*UEnum::GetValueAsString(PreviousMode), *UEnum::GetValueAsString(NewMode), *GetActiveBackendName().ToString());
+
+	if (!IsBackendReady())
+	{
+		LoginToBackend();
+	}
+	else
+	{
+		OnBackendReadyDelegate.Broadcast(true);
+	}
+
+	return true;
+}
+
+bool UUSSessionSubsystem::LoginToBackend()
+{
+	if (IsBackendReady())
+	{
+		OnBackendReadyDelegate.Broadcast(true);
+		return true;
+	}
+
+	if (bBackendLoginInFlight)
+	{
+		UE_LOG(LogUnrealSplit, Log, TEXT("Backend login already in flight; waiting for it."));
+		return true;
+	}
+
+	const IOnlineIdentityPtr Identity = GetIdentityInterface(this);
+	if (!Identity.IsValid())
+	{
+		UE_LOG(LogUnrealSplit, Error, TEXT("LoginToBackend failed: backend '%s' has no identity interface, but mode %s is configured to require a login."),
+			*GetActiveBackendName().ToString(), *UEnum::GetValueAsString(ConnectionMode));
+		OnBackendReadyDelegate.Broadcast(false);
+		return false;
+	}
+
+	bBackendLoginInFlight = true;
+
+	BackendLoginCompleteHandle = Identity->AddOnLoginCompleteDelegate_Handle(SessionLocalUserNum,
+		FOnLoginCompleteDelegate::CreateWeakLambda(this, [this](int32 InLocalUserIndex, bool bWasSuccessful, const FUniqueNetId& /*UserId*/, const FString& ErrorString)
+		{
+			OnBackendLoginFinished(InLocalUserIndex, bWasSuccessful, ErrorString);
+		}));
+
+	UE_LOG(LogUnrealSplit, Log, TEXT("Logging the primary user into backend '%s'."), *GetActiveBackendName().ToString());
+
+	// Same contract as everywhere else here: a backend may run the completion
+	// synchronously and still report failure from the call itself.
+	if (!Identity->AutoLogin(SessionLocalUserNum) && bBackendLoginInFlight)
+	{
+		OnBackendLoginFinished(SessionLocalUserNum, false, TEXT("AutoLogin was rejected by the backend before going async"));
+		return false;
+	}
+
+	return true;
+}
+
+void UUSSessionSubsystem::OnBackendLoginFinished(int32 LocalUserIndex, bool bWasSuccessful, const FString& ErrorString)
+{
+	if (LocalUserIndex != SessionLocalUserNum || !bBackendLoginInFlight)
+	{
+		return;
+	}
+
+	ClearBackendLoginDelegate();
+	bBackendLoginInFlight = false;
+
+	if (bWasSuccessful)
+	{
+		UE_LOG(LogUnrealSplit, Log, TEXT("Backend '%s' is ready: the primary user is logged in."), *GetActiveBackendName().ToString());
+	}
+	else
+	{
+		// Named explicitly because the usual cause is credentials or a missing
+		// developer auth tool, not anything the session layer can retry itself.
+		UE_LOG(LogUnrealSplit, Error, TEXT("Login to backend '%s' failed ('%s'). Hosting and searching stay refused in mode %s until a login succeeds."),
+			*GetActiveBackendName().ToString(), *ErrorString, *UEnum::GetValueAsString(ConnectionMode));
+	}
+
+	OnBackendReadyDelegate.Broadcast(bWasSuccessful);
+}
+
+bool UUSSessionSubsystem::EnsureBackendReady(const TCHAR* Context)
+{
+	if (!IsBackendInstalled())
+	{
+		UE_LOG(LogUnrealSplit, Error, TEXT("%s failed: mode %s needs the '%s' online subsystem, which is not enabled in this build."),
+			Context, *UEnum::GetValueAsString(ConnectionMode), *GetActiveBackendName().ToString());
+		return false;
+	}
+
+	if (IsBackendReady())
+	{
+		return true;
+	}
+
+	// Refuse now, but start the login the caller is missing so the retry works.
+	UE_LOG(LogUnrealSplit, Warning, TEXT("%s refused: backend '%s' has no logged-in user yet. Starting the login; retry when OnBackendReadyDelegate reports success."),
+		Context, *GetActiveBackendName().ToString());
+
+	LoginToBackend();
+	return false;
+}
+
+void UUSSessionSubsystem::ApplyNetDriverForMode()
+{
+	if (GEngine == nullptr)
+	{
+		return;
+	}
+
+	const FName DriverClassName = ConnectionMode == EUSConnectionMode::Internet ? InternetNetDriverClassName : LanNetDriverClassName;
+
+	for (FNetDriverDefinition& Definition : GEngine->NetDriverDefinitions)
+	{
+		if (Definition.DefName != GameNetDriverDefName)
+		{
+			continue;
+		}
+
+		if (Definition.DriverClassName == DriverClassName)
+		{
+			return;
+		}
+
+		UE_LOG(LogUnrealSplit, Log, TEXT("GameNetDriver: %s -> %s (fallback %s) for mode %s."),
+			*Definition.DriverClassName.ToString(), *DriverClassName.ToString(),
+			*NetDriverFallbackClassName.ToString(), *UEnum::GetValueAsString(ConnectionMode));
+
+		Definition.DriverClassName = DriverClassName;
+		Definition.DriverClassNameFallback = NetDriverFallbackClassName;
+		return;
+	}
+
+	UE_LOG(LogUnrealSplit, Error, TEXT("No '%s' net driver definition to point at %s; the engine will keep using whatever it was configured with."),
+		*GameNetDriverDefName.ToString(), *DriverClassName.ToString());
 }
 
 void UUSSessionSubsystem::HostSession(int32 MaxPlayers)
@@ -101,10 +359,16 @@ void UUSSessionSubsystem::HostSession(int32 MaxPlayers)
 		return;
 	}
 
-	const IOnlineSessionPtr Sessions = GetSessionInterface(GetGameInstance());
+	if (!EnsureBackendReady(TEXT("HostSession")))
+	{
+		OnSessionHostedDelegate.Broadcast(false);
+		return;
+	}
+
+	const IOnlineSessionPtr Sessions = GetSessionInterface(this);
 	if (!Sessions.IsValid())
 	{
-		UE_LOG(LogUnrealSplit, Error, TEXT("HostSession failed: no session interface. Check DefaultPlatformService in DefaultEngine.ini."));
+		UE_LOG(LogUnrealSplit, Error, TEXT("HostSession failed: backend '%s' has no session interface."), *GetActiveBackendName().ToString());
 		OnSessionHostedDelegate.Broadcast(false);
 		return;
 	}
@@ -129,14 +393,16 @@ void UUSSessionSubsystem::HostSession(int32 MaxPlayers)
 	Settings.NumPrivateConnections = 0;
 	Settings.bShouldAdvertise = true;
 	Settings.bAllowJoinInProgress = true;
-	Settings.bIsLANMatch = bUseLANMatch;
+	Settings.bIsLANMatch = IsLanMatch();
 	Settings.bIsDedicated = false;
 	Settings.bUsesPresence = false;
 	Settings.bAllowJoinViaPresence = false;
 	Settings.bAllowJoinViaPresenceFriendsOnly = false;
 	Settings.bAllowInvites = false;
-	// Lobbies are an internet-backend feature; revisit together with EOS.
-	Settings.bUseLobbiesIfAvailable = false;
+	// A lobby is how a hosted service lets a client join a host that has no
+	// routable address of its own, so it belongs to internet play only. LAN
+	// resolves the host directly from the broadcast reply.
+	Settings.bUseLobbiesIfAvailable = !IsLanMatch() && bInternetUsesLobbies;
 
 	const uint32 OperationId = BeginOperation();
 	SetSessionState(EUSSessionState::Creating);
@@ -147,7 +413,8 @@ void UUSSessionSubsystem::HostSession(int32 MaxPlayers)
 			OnCreateSessionFinished(OperationId, bWasSuccessful);
 		}));
 
-	UE_LOG(LogUnrealSplit, Log, TEXT("Creating session for %d players (LANMatch=%d)."), Settings.NumPublicConnections, bUseLANMatch ? 1 : 0);
+	UE_LOG(LogUnrealSplit, Log, TEXT("Creating session for %d players on backend '%s' (LANMatch=%d, Lobbies=%d)."),
+		Settings.NumPublicConnections, *GetActiveBackendName().ToString(), Settings.bIsLANMatch ? 1 : 0, Settings.bUseLobbiesIfAvailable ? 1 : 0);
 
 	// Backends are allowed to fire the completion synchronously and still return
 	// false, so only take the failure path if the completion has not run yet.
@@ -210,10 +477,16 @@ void UUSSessionSubsystem::FindSessions()
 		return;
 	}
 
-	const IOnlineSessionPtr Sessions = GetSessionInterface(GetGameInstance());
+	if (!EnsureBackendReady(TEXT("FindSessions")))
+	{
+		OnSessionsFoundDelegate.Broadcast(0);
+		return;
+	}
+
+	const IOnlineSessionPtr Sessions = GetSessionInterface(this);
 	if (!Sessions.IsValid())
 	{
-		UE_LOG(LogUnrealSplit, Error, TEXT("FindSessions failed: no session interface. Check DefaultPlatformService in DefaultEngine.ini."));
+		UE_LOG(LogUnrealSplit, Error, TEXT("FindSessions failed: backend '%s' has no session interface."), *GetActiveBackendName().ToString());
 		OnSessionsFoundDelegate.Broadcast(0);
 		return;
 	}
@@ -221,7 +494,7 @@ void UUSSessionSubsystem::FindSessions()
 	FoundSessions.Reset();
 
 	SessionSearch = MakeShared<FOnlineSessionSearch>();
-	SessionSearch->bIsLanQuery = bUseLANMatch;
+	SessionSearch->bIsLanQuery = IsLanMatch();
 	SessionSearch->MaxSearchResults = SessionMaxSearchResults;
 	SessionSearch->TimeoutInSeconds = SessionSearchTimeoutSeconds;
 
@@ -234,7 +507,8 @@ void UUSSessionSubsystem::FindSessions()
 			OnFindSessionsFinished(OperationId, bWasSuccessful);
 		}));
 
-	UE_LOG(LogUnrealSplit, Log, TEXT("Searching for sessions (LANQuery=%d, timeout %.0fs)."), bUseLANMatch ? 1 : 0, SessionSearchTimeoutSeconds);
+	UE_LOG(LogUnrealSplit, Log, TEXT("Searching for sessions on backend '%s' (LANQuery=%d, timeout %.0fs)."),
+		*GetActiveBackendName().ToString(), SessionSearch->bIsLanQuery ? 1 : 0, SessionSearchTimeoutSeconds);
 
 	if (!Sessions->FindSessions(SessionLocalUserNum, SessionSearch.ToSharedRef()) && IsOperationPending(OperationId))
 	{
@@ -336,10 +610,16 @@ void UUSSessionSubsystem::JoinFoundSession(int32 SearchResultIndex)
 		return;
 	}
 
-	const IOnlineSessionPtr Sessions = GetSessionInterface(GetGameInstance());
+	if (!EnsureBackendReady(TEXT("JoinFoundSession")))
+	{
+		OnJoinCompletedDelegate.Broadcast(false);
+		return;
+	}
+
+	const IOnlineSessionPtr Sessions = GetSessionInterface(this);
 	if (!Sessions.IsValid())
 	{
-		UE_LOG(LogUnrealSplit, Error, TEXT("JoinFoundSession failed: no session interface. Check DefaultPlatformService in DefaultEngine.ini."));
+		UE_LOG(LogUnrealSplit, Error, TEXT("JoinFoundSession failed: backend '%s' has no session interface."), *GetActiveBackendName().ToString());
 		OnJoinCompletedDelegate.Broadcast(false);
 		return;
 	}
@@ -383,7 +663,7 @@ void UUSSessionSubsystem::OnJoinSessionFinished(uint32 OperationId, bool bSucces
 	}
 
 	UGameInstance* GameInstance = GetGameInstance();
-	const IOnlineSessionPtr Sessions = GetSessionInterface(GameInstance);
+	const IOnlineSessionPtr Sessions = GetSessionInterface(this);
 
 	FString ConnectString;
 	APlayerController* PlayerController = GameInstance ? GameInstance->GetFirstLocalPlayerController() : nullptr;
@@ -432,7 +712,7 @@ void UUSSessionSubsystem::LeaveSession()
 		return;
 	}
 
-	const IOnlineSessionPtr Sessions = GetSessionInterface(GetGameInstance());
+	const IOnlineSessionPtr Sessions = GetSessionInterface(this);
 	const bool bHasSession = Sessions.IsValid() && Sessions->GetNamedSession(NAME_GameSession) != nullptr;
 
 	if (SessionState == EUSSessionState::Idle && !bHasSession)
@@ -489,7 +769,7 @@ bool UUSSessionSubsystem::AddLocalCoopPlayer()
 	// client puts it straight into the split-join message. Backends only
 	// auto-login the primary user, so without logging this one in first the
 	// player would carry an invalid id and could never be registered.
-	const IOnlineIdentityPtr Identity = GetIdentityInterface(GameInstance);
+	const IOnlineIdentityPtr Identity = GetIdentityInterface(this);
 	const int32 LocalUserIndex = IPlatformInputDeviceMapper::Get().GetUserIndexForPlatformUser(UserId);
 	const bool bNeedsLogin = Identity.IsValid() && LocalUserIndex >= 0 && Identity->GetLoginStatus(LocalUserIndex) != ELoginStatus::LoggedIn;
 
@@ -679,7 +959,7 @@ bool UUSSessionSubsystem::RemoveLocalCoopPlayer()
 
 void UUSSessionSubsystem::AbortSession(const FString& Reason)
 {
-	const IOnlineSessionPtr Sessions = GetSessionInterface(GetGameInstance());
+	const IOnlineSessionPtr Sessions = GetSessionInterface(this);
 	const bool bHasSession = Sessions.IsValid() && Sessions->GetNamedSession(NAME_GameSession) != nullptr;
 	const bool bWasSearching = SessionState == EUSSessionState::Searching;
 
@@ -815,7 +1095,7 @@ void UUSSessionSubsystem::DestroyLeftoverSession(const FString& Context)
 		return;
 	}
 
-	const IOnlineSessionPtr Sessions = GetSessionInterface(GetGameInstance());
+	const IOnlineSessionPtr Sessions = GetSessionInterface(this);
 	if (!Sessions.IsValid() || Sessions->GetNamedSession(NAME_GameSession) == nullptr)
 	{
 		return;
@@ -871,7 +1151,7 @@ void UUSSessionSubsystem::RegisterLocalPlayersWithSession(const FString& Context
 
 void UUSSessionSubsystem::TryRegisterPlayerInSession(const FUniqueNetIdRepl& UniqueId, const FString& Context)
 {
-	const IOnlineSessionPtr Sessions = GetSessionInterface(GetGameInstance());
+	const IOnlineSessionPtr Sessions = GetSessionInterface(this);
 	const FNamedOnlineSession* Session = Sessions.IsValid() ? Sessions->GetNamedSession(NAME_GameSession) : nullptr;
 	if (Session == nullptr)
 	{
@@ -920,7 +1200,7 @@ void UUSSessionSubsystem::EnsureRegisterPlayersDelegate()
 		return;
 	}
 
-	const IOnlineSessionPtr Sessions = GetSessionInterface(GetGameInstance());
+	const IOnlineSessionPtr Sessions = GetSessionInterface(this);
 	if (!Sessions.IsValid())
 	{
 		return;
@@ -976,7 +1256,7 @@ void UUSSessionSubsystem::ClearCreateSessionDelegate()
 		return;
 	}
 
-	if (const IOnlineSessionPtr Sessions = GetSessionInterface(GetGameInstance()))
+	if (const IOnlineSessionPtr Sessions = GetSessionInterface(this))
 	{
 		Sessions->ClearOnCreateSessionCompleteDelegate_Handle(CreateSessionCompleteHandle);
 	}
@@ -990,7 +1270,7 @@ void UUSSessionSubsystem::ClearFindSessionsDelegate()
 		return;
 	}
 
-	if (const IOnlineSessionPtr Sessions = GetSessionInterface(GetGameInstance()))
+	if (const IOnlineSessionPtr Sessions = GetSessionInterface(this))
 	{
 		Sessions->ClearOnFindSessionsCompleteDelegate_Handle(FindSessionsCompleteHandle);
 	}
@@ -1004,7 +1284,7 @@ void UUSSessionSubsystem::ClearJoinSessionDelegate()
 		return;
 	}
 
-	if (const IOnlineSessionPtr Sessions = GetSessionInterface(GetGameInstance()))
+	if (const IOnlineSessionPtr Sessions = GetSessionInterface(this))
 	{
 		Sessions->ClearOnJoinSessionCompleteDelegate_Handle(JoinSessionCompleteHandle);
 	}
@@ -1018,7 +1298,7 @@ void UUSSessionSubsystem::ClearDestroySessionDelegate()
 		return;
 	}
 
-	if (const IOnlineSessionPtr Sessions = GetSessionInterface(GetGameInstance()))
+	if (const IOnlineSessionPtr Sessions = GetSessionInterface(this))
 	{
 		Sessions->ClearOnDestroySessionCompleteDelegate_Handle(DestroySessionCompleteHandle);
 	}
@@ -1032,7 +1312,7 @@ void UUSSessionSubsystem::ClearRegisterPlayersDelegate()
 		return;
 	}
 
-	if (const IOnlineSessionPtr Sessions = GetSessionInterface(GetGameInstance()))
+	if (const IOnlineSessionPtr Sessions = GetSessionInterface(this))
 	{
 		Sessions->ClearOnRegisterPlayersCompleteDelegate_Handle(RegisterPlayersCompleteHandle);
 	}
@@ -1046,13 +1326,29 @@ void UUSSessionSubsystem::ClearLoginDelegate()
 		return;
 	}
 
-	const IOnlineIdentityPtr Identity = GetIdentityInterface(GetGameInstance());
+	const IOnlineIdentityPtr Identity = GetIdentityInterface(this);
 	if (Identity.IsValid() && PendingLoginLocalUserIndex != INDEX_NONE)
 	{
 		// Takes the handle by reference and resets it.
 		Identity->ClearOnLoginCompleteDelegate_Handle(PendingLoginLocalUserIndex, LoginCompleteHandle);
 	}
 	LoginCompleteHandle.Reset();
+}
+
+void UUSSessionSubsystem::ClearBackendLoginDelegate()
+{
+	if (!BackendLoginCompleteHandle.IsValid())
+	{
+		return;
+	}
+
+	const IOnlineIdentityPtr Identity = GetIdentityInterface(this);
+	if (Identity.IsValid())
+	{
+		// Takes the handle by reference and resets it.
+		Identity->ClearOnLoginCompleteDelegate_Handle(SessionLocalUserNum, BackendLoginCompleteHandle);
+	}
+	BackendLoginCompleteHandle.Reset();
 }
 
 void UUSSessionSubsystem::ClearSessionDelegates()
@@ -1063,6 +1359,7 @@ void UUSSessionSubsystem::ClearSessionDelegates()
 	ClearDestroySessionDelegate();
 	ClearRegisterPlayersDelegate();
 	ClearLoginDelegate();
+	ClearBackendLoginDelegate();
 }
 
 void UUSSessionSubsystem::SetSessionState(EUSSessionState NewState)
