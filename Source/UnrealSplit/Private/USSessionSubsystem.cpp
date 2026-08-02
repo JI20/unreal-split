@@ -23,6 +23,7 @@
 #include "OnlineSubsystemUtils.h"
 #include "UObject/Class.h"
 
+#include "USConsoleReport.h"
 #include "UnrealSplitModule.h"
 #include "UnrealSplitStartupModule.h"
 
@@ -581,23 +582,25 @@ void UUSSessionSubsystem::OnFindSessionsFinished(uint32 OperationId, bool bWasSu
 	}
 	else
 	{
-		UE_LOG(LogUnrealSplit, Warning, TEXT("Session search failed or returned no usable search object."));
+		USConsole::ReportAsyncWarning(GetGameInstance(), TEXT("Session search failed or returned no usable search object."));
 		SessionSearch.Reset();
 	}
 
 	SetSessionState(EUSSessionState::Idle);
 
+	// A search is started from the console and resolves seconds later, so its
+	// result goes back to the console that asked for it as well as to the log.
 	// Raw alongside joinable, because "the backend returned nothing" and "the
 	// backend returned sessions this build cannot join" are different problems
 	// that a single count hides.
-	UE_LOG(LogUnrealSplit, Log, TEXT("Session search finished on backend '%s'. %s Raw=%d Joinable=%d"),
-		*GetBackendName().ToString(), *DescribeDiscoveryKeys(), RawResults, FoundSessions.Num());
+	USConsole::ReportAsync(GetGameInstance(), FString::Printf(TEXT("Session search finished on backend '%s'. %s Raw=%d Joinable=%d"),
+		*GetBackendName().ToString(), *DescribeDiscoveryKeys(), RawResults, FoundSessions.Num()));
 
 	for (int32 Index = 0; Index < FoundSessions.Num(); ++Index)
 	{
 		const FUSSessionSearchResultInfo& Info = FoundSessions[Index];
-		UE_LOG(LogUnrealSplit, Log, TEXT("  [%d] Id='%s' Owner='%s' Ping=%dms Slots=%d/%d"),
-			Index, *Info.SessionId, *Info.OwnerName, Info.PingInMs, Info.OpenPublicConnections, Info.MaxPublicConnections);
+		USConsole::ReportAsync(GetGameInstance(), FString::Printf(TEXT("  [%d] Id='%s' Owner='%s' Ping=%dms Slots=%d/%d — join with US.Join %d"),
+			Index, *Info.SessionId, *Info.OwnerName, Info.PingInMs, Info.OpenPublicConnections, Info.MaxPublicConnections, Index));
 	}
 
 	if (bWasSuccessful && RawResults == 0)
@@ -605,8 +608,8 @@ void UUSSessionSubsystem::OnFindSessionsFinished(uint32 OperationId, bool bWasSu
 		// The one outcome with no evidence in it at all. Naming what is left to
 		// check is the difference between reading the next log line and starting
 		// a debugging session.
-		UE_LOG(LogUnrealSplit, Warning, TEXT("The backend accepted the search and returned nothing. The local user IS signed in, so this is not a login problem. Compare this line's %s against the host's 'Creating session' line: a host that advertised a different kind or a different bucket is invisible here. Then check that the host is still running and did advertise."),
-			*DescribeDiscoveryKeys());
+		USConsole::ReportAsyncWarning(GetGameInstance(), FString::Printf(TEXT("The backend accepted the search and returned nothing. The local user IS signed in, so this is not a login problem. Compare this line's %s against the host's 'Creating session' line: a host that advertised a different kind or a different bucket is invisible here. Then check that the host is still running and did advertise."),
+			*DescribeDiscoveryKeys()));
 	}
 
 	OnSessionsFoundDelegate.Broadcast(FoundSessions.Num());

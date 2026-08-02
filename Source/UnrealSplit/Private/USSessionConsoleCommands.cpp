@@ -85,7 +85,7 @@ static FAutoConsoleCommandWithWorldArgsAndOutputDevice GUSFindCommand(
 			return;
 		}
 
-		Report(Ar, FString::Printf(TEXT("US.Find: searching on '%s' (%s); results are logged on completion and listed by US.SessionState."),
+		Report(Ar, FString::Printf(TEXT("US.Find: searching on '%s' (%s); the results print here when the search resolves, and US.SessionState lists them again later."),
 			*Sessions->GetBackendName().ToString(), *Sessions->DescribeDiscoveryKeys()));
 		Sessions->FindSessions();
 	}));

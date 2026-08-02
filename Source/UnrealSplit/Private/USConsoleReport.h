@@ -4,7 +4,9 @@
 
 #include "CoreMinimal.h"
 
+#include "Engine/Console.h"
 #include "Engine/GameInstance.h"
+#include "Engine/GameViewportClient.h"
 #include "Engine/World.h"
 
 #include "UnrealSplitModule.h"
@@ -23,7 +25,7 @@ namespace USConsole
 	 * default — so without the output device these answers are invisible unless
 	 * the game was launched with -log, while the log is what survives the
 	 * session. Asynchronous outcomes arrive long after the command returned and
-	 * cannot use this; they stay log-only.
+	 * its output device is gone by then; those use ReportAsync instead.
 	 */
 	inline void Report(FOutputDevice& Ar, const FString& Message)
 	{
@@ -35,6 +37,37 @@ namespace USConsole
 	{
 		Ar.Log(ELogVerbosity::Warning, Message);
 		UE_LOG(LogUnrealSplit, Warning, TEXT("%s"), *Message);
+	}
+
+	/**
+	 * Writes into the in-game console's own scrollback, which is where a
+	 * command's answer landed, so a result that arrives later shows up
+	 * underneath the line that promised it instead of only in a -log window.
+	 * There is no console on a dedicated server or in a shipping build, and
+	 * none before the viewport exists, in which case this does nothing and the
+	 * log line alongside it is the whole record.
+	 */
+	inline void EchoToInGameConsole(const UGameInstance* GameInstance, const FString& Message)
+	{
+		UGameViewportClient* const Viewport = GameInstance != nullptr ? GameInstance->GetGameViewportClient() : nullptr;
+
+		if (UConsole* InGameConsole = Viewport != nullptr ? Viewport->ViewportConsole : nullptr)
+		{
+			InGameConsole->OutputText(Message);
+		}
+	}
+
+	/** Reports an outcome that resolved after the command that started it returned. */
+	inline void ReportAsync(const UGameInstance* GameInstance, const FString& Message)
+	{
+		UE_LOG(LogUnrealSplit, Log, TEXT("%s"), *Message);
+		EchoToInGameConsole(GameInstance, Message);
+	}
+
+	inline void ReportAsyncWarning(const UGameInstance* GameInstance, const FString& Message)
+	{
+		UE_LOG(LogUnrealSplit, Warning, TEXT("%s"), *Message);
+		EchoToInGameConsole(GameInstance, Message);
 	}
 
 	/**
