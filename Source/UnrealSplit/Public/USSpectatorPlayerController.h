@@ -5,6 +5,7 @@
 #include "CoreMinimal.h"
 #include "Camera/CameraTypes.h"
 #include "GameFramework/PlayerController.h"
+#include "USViewTypes.h"
 #include "USSpectatorPlayerController.generated.h"
 
 class AUSPlayerViewProxy;
@@ -43,7 +44,9 @@ class ASpectatorPawn;
  *   - No automatic camera target, which would otherwise hand the view to a level
  *     camera with a matching auto-activate index and quietly stop showing the
  *     partner.
- *   - The audio listener is reported at the real player's ears rather than here.
+ *   - The audio listener is reported at the real player's ears rather than here,
+ *     unless this machine's policy is Shared, in which case this view is a second
+ *     set of ears at the partner's camera (US.AudioMode).
  */
 UCLASS(NotPlaceable)
 class UNREALSPLIT_API AUSSpectatorPlayerController : public APlayerController
@@ -79,6 +82,9 @@ private:
 	 * machine's own camera, so both views are framed by the same rules.
 	 */
 	void ApplyLocalProjectionSettings(FMinimalViewInfo& OutResult) const;
+
+	/** This machine's listener policy, or Own when the plugin's viewport client is absent. */
+	EUSAudioListenerMode GetResolvedAudioListenerMode() const;
 
 	UPROPERTY()
 	TObjectPtr<AUSPlayerViewProxy> ViewProxy;

@@ -6,7 +6,10 @@
 #include "Engine/World.h"
 #include "GameFramework/SpectatorPawn.h"
 
+#include "Engine/GameInstance.h"
+
 #include "UnrealSplitModule.h"
+#include "USGameViewportClient.h"
 #include "USPlayerViewProxy.h"
 #include "USShadowLocalPlayer.h"
 
@@ -178,24 +181,56 @@ bool AUSSpectatorPlayerController::CanRestartPlayer()
 	return false;
 }
 
+EUSAudioListenerMode AUSSpectatorPlayerController::GetResolvedAudioListenerMode() const
+{
+	// Own when the game does not use this plugin's viewport client. That is the
+	// pre-1.9 behaviour and the safe half of the choice: a second set of ears can
+	// surprise you with sound from elsewhere, a second listener on top of the first
+	// cannot do anything at all.
+	const UGameInstance* const GameInstance = GetGameInstance();
+	const UUSGameViewportClient* const Viewport = GameInstance != nullptr
+		? Cast<UUSGameViewportClient>(GameInstance->GetGameViewportClient())
+		: nullptr;
+
+	return Viewport != nullptr ? Viewport->GetAudioListenerMode() : EUSAudioListenerMode::Own;
+}
+
 void AUSSpectatorPlayerController::GetAudioListenerPosition(FVector& OutLocation, FVector& OutFrontDir, FVector& OutRightDir) const
 {
 	// UGameViewportClient::Draw sets an audio listener for every local player that
-	// has a controller, and there is no flag to opt out of that — so instead of
-	// suppressing this machine's second listener, it is placed exactly on top of
-	// the first. Attenuation picks the nearest listener, and two in the same place
-	// give the same mix as one, so the partner's half of the screen adds no ears
-	// to the level. Reporting this controller's own position would let sounds near
-	// the partner be heard as if they were next to the player.
-	if (const APlayerController* const RealController = UUSShadowLocalPlayer::GetFirstRealLocalPlayerController(GetGameInstance()))
+	// has a controller, and there is no flag to opt out of that. This machine
+	// therefore has two listeners in both modes, and the policy is only ever about
+	// where this one sits.
+	//
+	// Own places it exactly on top of the first. Attenuation picks the nearest
+	// listener, and two in the same place give the same mix as one, so the partner's
+	// half of the screen adds no ears to the level. Reporting this controller's own
+	// position instead would let sounds near the partner be heard as if they were
+	// next to the player — which is precisely what Shared wants.
+	//
+	// Shared also needs a partner camera to put those ears at, and before the first
+	// sample arrives there is none: CalcCamera is drawing a fallback view, and ears
+	// at a fallback view are ears in an arbitrary part of the level. Until the stream
+	// delivers, Shared behaves as Own — which is what those frames sound like today.
+	const bool bShared = GetResolvedAudioListenerMode() == EUSAudioListenerMode::Shared && bHasKnownView;
+
+	if (!bShared)
 	{
-		if (RealController != this)
+		if (const APlayerController* const RealController = UUSShadowLocalPlayer::GetFirstRealLocalPlayerController(GetGameInstance()))
 		{
-			RealController->GetAudioListenerPosition(OutLocation, OutFrontDir, OutRightDir);
-			return;
+			if (RealController != this)
+			{
+				RealController->GetAudioListenerPosition(OutLocation, OutFrontDir, OutRightDir);
+				return;
+			}
 		}
 	}
 
+	// The base class reads this controller's camera cache, which Tick above filled
+	// from the interpolated stream — so under Shared the second listener ends up on
+	// the partner's camera, delayed and smoothed exactly like the image it belongs
+	// to. Nothing extra has to be replicated for that; it is the same sample the
+	// view is already drawn from.
 	Super::GetAudioListenerPosition(OutLocation, OutFrontDir, OutRightDir);
 }
 

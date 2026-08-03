@@ -50,7 +50,41 @@ Also useful: `stat unit`, `stat net`, `US.ViewState`.
 - [ ] Walk the ladder clean → torture (or sample good + poor).
 - [ ] `US.NetProfile off` on every process you touched — confirm feel returns.
 
-## 4. EOS pair
+## 4. Audio listener policy (`US.AudioMode`)
+
+Local, per-machine, never replicated. `own` = one set of ears on your own view;
+`shared` = one per view, each spatialised sound played **once** from the nearer.
+Global 2D sound (music, dialogue) is unaffected by either. `US.ViewState` reports
+the mode and where it was resolved from; the default (`Auto`) reproduces whatever
+the topology did before 1.9 — couch `shared`, remote `own`.
+
+You need a sound that is spatialised and clearly positional: footsteps or a jump
+land well, music does not.
+
+### Couch
+
+- [ ] Standalone Game, two pads, `US.AddLocalPlayer`.
+- [ ] P2 walks far away from P1 and jumps. Default (`shared`): audible.
+- [ ] `US.AudioMode own` → P2's distant footsteps go silent. Walking P2 back toward
+      P1's camera brings them back.
+- [ ] `US.AudioMode shared` → distant footsteps audible again.
+
+### Remote
+
+- [ ] `.\Scripts\run-lan-pair.ps1`, host/join, partner walks far away on machine B.
+- [ ] On A, default (`own`): partner's footsteps inaudible.
+- [ ] `US.AudioMode shared` on **A only** → audible, from the shadow view's
+      perspective (delayed and smoothed exactly like the image).
+- [ ] Machine B unchanged — confirm with `US.ViewState` on B.
+
+### Abuse
+
+- [ ] Spam `US.AudioMode shared` / `own` repeatedly: no crash, no doubled or phasing
+      sound, `US.ViewState` always matches what you hear.
+- [ ] Switch during a split↔merge blend, and again mid-travel (host, leave).
+- [ ] `US.AudioMode auto` is refused on purpose (it is a config-only default).
+
+## 5. EOS pair
 
 - [ ] Dev Auth Tool up. `.\Scripts\run-eos-pair.ps1` (auth args baked in).
 - [ ] Same host/find/join smoke as LAN.
@@ -58,11 +92,11 @@ Also useful: `stat unit`, `stat net`, `US.ViewState`.
       latency stacks with injection.
 - [ ] `US.NetProfile off` before you quit so the next session is clean.
 
-## Automated tests (session state machine)
+## Automated tests (session state machine, audio policy state)
 
 Developer module `UnrealSplitTests`. Single process, **Null OSS only**. Never
 enables packet simulation. Filter prefix: `UnrealSplit` (covers
-`UnrealSplit.Session.*`).
+`UnrealSplit.Session.*` and `UnrealSplit.Audio.*`).
 
 **These tests need a running game world.** They drive the real session flow, and
 hosting reopens the current map as a listen server — that only works in a game
@@ -114,6 +148,12 @@ EOS login is not required for this suite; Null is enough.
 | Capacity | `…Capacity.TwoLocalsRefuseThird`, `SlotRecycling`, `HostClampDegenerate` (`Host 0` / `Host 99`) |
 | Registration | primary refuse, secondary remove, double-unregister, OSS double-register, unregister never-registered |
 | Failure | `…Failure.JoinInvalidIndex`, `JoinStaleNoSearch` |
+| Audio policy | `UnrealSplit.Audio.Policy.*` — Auto resolution, command parsing, idempotent switching, reset to config |
+
+`UnrealSplit.Audio.Policy.AutoResolvesPerTopology` is pure state logic and runs
+anywhere; the rest need a game world like the session groups. None of them assert
+on rendered audio — that is what the manual recipe in section 4 is for. They
+restore whatever mode the machine was in when they started.
 
 ### Intentionally not automated here
 

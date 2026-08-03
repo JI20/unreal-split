@@ -468,6 +468,9 @@ static FAutoConsoleCommandWithWorldArgsAndOutputDevice GUSViewStateCommand(
 				bFixed ? TEXT("fixed — server-assigned slots, player 1 left") : TEXT("own — this machine's player left"),
 				(!bFixed && Player1Slot == 1) ? TEXT("; player 1 is in the RIGHT slot here, so the ratio applies to the right") : TEXT("")));
 
+			Report(Ar, FString::Printf(TEXT("Audio listeners: %s (local only, US.AudioMode)."),
+				*Viewport->DescribeAudioListenerPolicy()));
+
 			for (int32 SlotIndex = 0; SlotIndex < Slots.Num(); ++SlotIndex)
 			{
 				const ULocalPlayer* const SlotPlayer = Slots[SlotIndex];
@@ -545,6 +548,43 @@ static FAutoConsoleCommandWithWorldArgsAndOutputDevice GUSViewOrderCommand(
 
 		Report(Ar, FString::Printf(TEXT("US.ViewOrder: %s. Player1Share still means player 1's width."),
 			bWantsFixed ? TEXT("fixed (player identity, host left)") : TEXT("own (this machine's player left)")));
+	}));
+
+static FAutoConsoleCommandWithWorldArgsAndOutputDevice GUSAudioModeCommand(
+	TEXT("US.AudioMode"),
+	TEXT("UnrealSplit: how many audio listeners this machine puts in the level. Usage: US.AudioMode [own|shared]. own = one set of ears on your own view; shared = one per view, each sound played once from the nearer (It Takes Two model). Local only, never replicated, effective immediately."),
+	FConsoleCommandWithWorldArgsAndOutputDeviceDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World, FOutputDevice& Ar)
+	{
+		UGameInstance* const GameInstance = World != nullptr ? World->GetGameInstance() : nullptr;
+		UUSGameViewportClient* const Viewport = GameInstance != nullptr
+			? Cast<UUSGameViewportClient>(GameInstance->GetGameViewportClient())
+			: nullptr;
+
+		if (Viewport == nullptr)
+		{
+			ReportWarning(Ar, TEXT("US.AudioMode: no UUSGameViewportClient on this world."));
+			return;
+		}
+
+		if (Args.Num() == 0)
+		{
+			Report(Ar, FString::Printf(TEXT("US.AudioMode: %s"), *Viewport->DescribeAudioListenerPolicy()));
+			return;
+		}
+
+		const FString& Argument = Args[0];
+		const bool bWantsOwn = Argument.Equals(TEXT("own"), ESearchCase::IgnoreCase);
+		const bool bWantsShared = Argument.Equals(TEXT("shared"), ESearchCase::IgnoreCase);
+
+		if (!bWantsOwn && !bWantsShared)
+		{
+			ReportWarning(Ar, FString::Printf(TEXT("US.AudioMode: '%s' is neither own nor shared. Usage: US.AudioMode [own|shared]."), *Argument));
+			return;
+		}
+
+		Viewport->SetAudioListenerMode(bWantsOwn ? EUSAudioListenerMode::Own : EUSAudioListenerMode::Shared);
+
+		Report(Ar, FString::Printf(TEXT("US.AudioMode: %s"), *Viewport->DescribeAudioListenerPolicy()));
 	}));
 
 static FAutoConsoleCommandWithWorldArgsAndOutputDevice GUSRemoteViewCommand(

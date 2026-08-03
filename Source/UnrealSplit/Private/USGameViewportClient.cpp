@@ -11,6 +11,7 @@
 
 #include "UnrealSplitModule.h"
 #include "USPlayerViewProxy.h"
+#include "USShadowLocalPlayer.h"
 #include "USSpectatorPlayerController.h"
 
 namespace
@@ -65,6 +66,11 @@ void UUSGameViewportClient::Tick(float DeltaTime)
 	// appears at all — from waiting for the next intent to be placed.
 	UpdateMergedViewTargets();
 	LayoutPlayers();
+
+	// After the layout, because Auto reads the same topology the layout just walked,
+	// and every frame because the transform an Own-mode listener copies is a live
+	// camera. UGameViewportClient::Draw reads listener positions later in the frame.
+	UpdateAudioListenerPolicy();
 }
 
 void UUSGameViewportClient::LayoutPlayers()
@@ -159,6 +165,179 @@ void UUSGameViewportClient::SetViewOrderMode(EUSViewOrderMode NewMode)
 	LayoutPlayers();
 }
 
+EUSAudioListenerMode UUSGameViewportClient::ResolveAutoAudioListenerMode(bool bHasShadowView)
+{
+	// Auto is defined as "leave every existing session sounding the way it did".
+	// A shadow view is the one topology where the second view is not a person in the
+	// room, and it is the one that used a single listener before this policy existed.
+	return bHasShadowView ? EUSAudioListenerMode::Own : EUSAudioListenerMode::Shared;
+}
+
+bool UUSGameViewportClient::HasShadowView() const
+{
+	if (GEngine == nullptr)
+	{
+		return false;
+	}
+
+	for (const ULocalPlayer* const Player : GEngine->GetGamePlayers(this))
+	{
+		if (UUSShadowLocalPlayer::IsShadow(Player))
+		{
+			return true;
+		}
+	}
+
+	return false;
+}
+
+EUSAudioListenerMode UUSGameViewportClient::GetAudioListenerMode() const
+{
+	if (AudioListenerModeOverride.IsSet())
+	{
+		return AudioListenerModeOverride.GetValue();
+	}
+
+	switch (AudioListenerMode)
+	{
+	case EUSAudioListenerModeSetting::Own:
+		return EUSAudioListenerMode::Own;
+
+	case EUSAudioListenerModeSetting::Shared:
+		return EUSAudioListenerMode::Shared;
+
+	case EUSAudioListenerModeSetting::Auto:
+	default:
+		return ResolveAutoAudioListenerMode(HasShadowView());
+	}
+}
+
+void UUSGameViewportClient::SetAudioListenerMode(EUSAudioListenerMode NewMode)
+{
+	const bool bAlreadyThere = AudioListenerModeOverride.IsSet() && AudioListenerModeOverride.GetValue() == NewMode;
+	if (bAlreadyThere)
+	{
+		return;
+	}
+
+	AudioListenerModeOverride = NewMode;
+
+	UE_LOG(LogUnrealSplit, Log, TEXT("Audio listeners on this machine: %s."),
+		NewMode == EUSAudioListenerMode::Shared
+			? TEXT("shared (one set of ears per view, nearest wins per sound)")
+			: TEXT("own (one set of ears, on this machine's own view)"));
+
+	UpdateAudioListenerPolicy();
+}
+
+void UUSGameViewportClient::ResetAudioListenerModeToConfig()
+{
+	if (!AudioListenerModeOverride.IsSet())
+	{
+		return;
+	}
+
+	AudioListenerModeOverride.Reset();
+	UpdateAudioListenerPolicy();
+}
+
+void UUSGameViewportClient::UpdateAudioListenerPolicy()
+{
+	APlayerController* const PrimaryController = UUSShadowLocalPlayer::GetFirstRealLocalPlayerController(GetGameInstance());
+
+	// Shared is the engine's own arrangement — every view's listener at that view —
+	// so it is reached by giving back what was taken rather than by setting anything.
+	if (GetAudioListenerMode() == EUSAudioListenerMode::Shared || PrimaryController == nullptr)
+	{
+		ReleaseHeldAudioListeners();
+		return;
+	}
+
+	// Read through GetAudioListenerPosition rather than off the camera, so a game
+	// that moves its own listener deliberately is followed rather than overruled.
+	// The rotation is rebuilt from the axes the engine will rebuild them from again.
+	FVector PrimaryLocation;
+	FVector PrimaryFront;
+	FVector PrimaryRight;
+	PrimaryController->GetAudioListenerPosition(PrimaryLocation, PrimaryFront, PrimaryRight);
+	const FRotator PrimaryRotation = FRotationMatrix::MakeFromXY(PrimaryFront, PrimaryRight).Rotator();
+
+	TArray<ULocalPlayer*> RealPlayers;
+	UUSShadowLocalPlayer::GetRealLocalPlayers(GetGameInstance(), RealPlayers);
+
+	TArray<TWeakObjectPtr<APlayerController>> StillHeld;
+	StillHeld.Reserve(HeldAudioListeners.Num());
+
+	for (const ULocalPlayer* const Player : RealPlayers)
+	{
+		APlayerController* const Controller = Player != nullptr ? Player->PlayerController : nullptr;
+		if (Controller == nullptr || Controller == PrimaryController)
+		{
+			continue;
+		}
+
+		// Both listeners in the same place mix identically to one: attenuation picks
+		// the nearest, and there is no nearer. Nothing is muted, so a sound that is
+		// audible from the primary's ears stays audible.
+		Controller->SetAudioListenerOverride(nullptr, PrimaryLocation, PrimaryRotation);
+		StillHeld.Add(Controller);
+	}
+
+	for (const TWeakObjectPtr<APlayerController>& Held : HeldAudioListeners)
+	{
+		if (!StillHeld.Contains(Held))
+		{
+			if (APlayerController* const Controller = Held.Get())
+			{
+				Controller->ClearAudioListenerOverride();
+			}
+		}
+	}
+
+	HeldAudioListeners = MoveTemp(StillHeld);
+}
+
+void UUSGameViewportClient::ReleaseHeldAudioListeners()
+{
+	for (const TWeakObjectPtr<APlayerController>& Held : HeldAudioListeners)
+	{
+		if (APlayerController* const Controller = Held.Get())
+		{
+			Controller->ClearAudioListenerOverride();
+		}
+	}
+
+	HeldAudioListeners.Reset();
+}
+
+FString UUSGameViewportClient::DescribeAudioListenerPolicy() const
+{
+	const EUSAudioListenerMode Mode = GetAudioListenerMode();
+	const bool bShared = Mode == EUSAudioListenerMode::Shared;
+
+	FString Source;
+	if (AudioListenerModeOverride.IsSet())
+	{
+		Source = TEXT("US.AudioMode, holding the configured default off");
+	}
+	else if (AudioListenerMode == EUSAudioListenerModeSetting::Auto)
+	{
+		Source = FString::Printf(TEXT("auto, from the %s topology here"),
+			HasShadowView() ? TEXT("remote (shadow view)") : TEXT("couch (no shadow view)"));
+	}
+	else
+	{
+		Source = TEXT("config default");
+	}
+
+	return FString::Printf(TEXT("%s — %s; resolved from %s"),
+		bShared ? TEXT("shared") : TEXT("own"),
+		bShared
+			? TEXT("both views have ears, each sound played once from the nearer")
+			: TEXT("one set of ears on this machine's own view"),
+		*Source);
+}
+
 void UUSGameViewportClient::GetLaidOutSlots(TArray<ULocalPlayer*>& OutSlots) const
 {
 	GatherSlots(OutSlots);
@@ -169,6 +348,11 @@ void UUSGameViewportClient::ResetForNewWorld()
 	// The records are dropped rather than restored: the controllers they refer to
 	// belong to the world being left, and their cameras are going away with them.
 	MergedViewTargetRecords.Reset();
+
+	// Same for the listeners this policy holds. The chosen mode is a preference for
+	// this machine and survives travel; the controllers it was applied to do not, and
+	// the next world's are picked up on the first tick there.
+	ReleaseHeldAudioListeners();
 
 	TargetIntent = FUSViewIntent();
 	CurrentShare = TargetIntent.Player1Share;

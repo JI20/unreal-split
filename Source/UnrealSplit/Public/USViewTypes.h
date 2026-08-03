@@ -57,6 +57,57 @@ enum class EUSViewOrderMode : uint8
 };
 
 /**
+ * How many sets of ears this machine puts in the level.
+ *
+ * The screen always shows two views; this is the separate question of whether the
+ * level is heard from one of them or from both. Presentation only, exactly like
+ * EUSViewOrderMode: never replicated, so two machines in the same session may
+ * answer it differently, and neither can hear what the other chose.
+ *
+ * There is deliberately no third value for "both views' full mixes at once". The
+ * engine renders one mix per audio device, not one per listener, so summing two
+ * would mean rendering every sound twice and adding the results — doubling and
+ * phasing on anything both listeners can hear.
+ */
+UENUM(BlueprintType)
+enum class EUSAudioListenerMode : uint8
+{
+	/**
+	 * One set of ears, on this machine's own view. Global 2D sound — music,
+	 * dialogue — is unaffected; spatialised sound is heard only where you are.
+	 */
+	Own,
+
+	/**
+	 * One set of ears per view. Every spatialised sound is evaluated against both
+	 * and played once, from whichever is nearer, so the partner's surroundings are
+	 * audible without any sound arriving twice. The It Takes Two model.
+	 */
+	Shared
+};
+
+/**
+ * The configured policy, which has one value more than the policy itself.
+ *
+ * Auto is the default and means "whatever this topology already did": couch has
+ * two people at two real cameras and keeps both sets of ears, while a shadow view
+ * is a window onto a camera in another building and lends none. That makes turning
+ * this setting on change nothing until somebody asks it to, and it is why the
+ * runtime surface (US.AudioMode) offers only the two real answers — Auto is a
+ * statement about defaults, not a way to hear the game.
+ */
+UENUM()
+enum class EUSAudioListenerModeSetting : uint8
+{
+	/** Resolve per topology: couch as Shared, a machine with a shadow view as Own. */
+	Auto,
+
+	Own,
+
+	Shared
+};
+
+/**
  * The authoritative, shared screen layout for a co-op session — the complete
  * answer to "how is the screen divided right now".
  *

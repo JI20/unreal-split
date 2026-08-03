@@ -38,6 +38,11 @@ class ULocalPlayer;
  * left/right framing. Player1Share always means that player's width: when a
  * machine opts into "own" order and puts player 1 on the right, the ratio is
  * applied to the right slot rather than to the left edge of the screen.
+ *
+ * The audio listener policy lives here for the same reason the slot order does: it
+ * is a local presentation choice about the views this class already owns. The
+ * engine gives one listener per drawn view and no way to refuse one, so "one set of
+ * ears" and "two" are both expressed by where those listeners sit.
  */
 UCLASS(Config = Game)
 class UNREALSPLIT_API UUSGameViewportClient : public UGameViewportClient
@@ -61,6 +66,38 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "UnrealSplit|View")
 	EUSViewOrderMode GetViewOrderMode() const { return ViewOrderMode; }
+
+	/**
+	 * Local presentation: whether the level is heard from one view or from both.
+	 *
+	 * Lives here because the listener topology follows the view topology exactly —
+	 * this is the class that knows how many views there are and which of them is
+	 * somebody else's camera. Unreplicated, like the view order.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "UnrealSplit|View")
+	void SetAudioListenerMode(EUSAudioListenerMode NewMode);
+
+	/** Drops a runtime override and goes back to the configured setting, Auto included. */
+	void ResetAudioListenerModeToConfig();
+
+	/** The policy in force right now, with Auto already resolved to own or shared. */
+	UFUNCTION(BlueprintPure, Category = "UnrealSplit|View")
+	EUSAudioListenerMode GetAudioListenerMode() const;
+
+	/** True while a runtime call is holding the configured setting off. */
+	bool IsAudioListenerModeOverridden() const { return AudioListenerModeOverride.IsSet(); }
+
+	/** One line for US.ViewState: the mode, what it means here, and where it came from. */
+	FString DescribeAudioListenerPolicy() const;
+
+	/**
+	 * What Auto means for a given topology, as a pure function so that both
+	 * answers can be asserted without building either topology.
+	 */
+	static EUSAudioListenerMode ResolveAutoAudioListenerMode(bool bHasShadowView);
+
+	/** True when one of this machine's views is a partner's camera rather than a player. */
+	bool HasShadowView() const;
 
 	/** Left-to-right slots as currently laid out, for diagnostics. */
 	void GetLaidOutSlots(TArray<ULocalPlayer*>& OutSlots) const;
@@ -159,6 +196,23 @@ private:
 	void GatherSlots(TArray<ULocalPlayer*>& OutSlots) const;
 
 	/**
+	 * Puts every listener this class is responsible for where the current policy
+	 * says it belongs, or releases the ones it holds.
+	 *
+	 * Only a second *real* local player is dealt with here, and only because it has
+	 * to be: that controller is the game's own class, so the plugin cannot override
+	 * its listener position and drives the engine's public override instead. A
+	 * shadow view answers for itself inside AUSSpectatorPlayerController.
+	 *
+	 * Re-run every frame because the transform it copies is the primary's live
+	 * camera, not a fixed point.
+	 */
+	void UpdateAudioListenerPolicy();
+
+	/** Hands back every listener this policy took over, and forgets them. */
+	void ReleaseHeldAudioListeners();
+
+	/**
 	 * Reflected so that garbage collection can see the merged view target inside
 	 * it: a bare pointer here would be left dangling by an actor the game
 	 * destroys, and this one is game-supplied by definition.
@@ -172,6 +226,26 @@ private:
 	 */
 	UPROPERTY(Config)
 	EUSViewOrderMode ViewOrderMode = EUSViewOrderMode::Fixed;
+
+	/**
+	 * Configured listener policy. Auto by default, which reproduces the behaviour
+	 * every session had before the setting existed.
+	 */
+	UPROPERTY(Config)
+	EUSAudioListenerModeSetting AudioListenerMode = EUSAudioListenerModeSetting::Auto;
+
+	/** Set only by SetAudioListenerMode; outranks the configured setting until reset. */
+	TOptional<EUSAudioListenerMode> AudioListenerModeOverride;
+
+	/**
+	 * Controllers whose listener position this policy currently owns.
+	 *
+	 * Remembered so that releasing gives back only what was taken: game code is
+	 * free to use the same engine override for a cutscene or a security camera, and
+	 * clearing that would be this plugin reaching into game territory. Weak because
+	 * a couch player can leave, and travel takes every controller with it.
+	 */
+	TArray<TWeakObjectPtr<APlayerController>> HeldAudioListeners;
 
 	/** Blend bookkeeping. All of it local; none of it replicates. */
 	float CurrentShare = 0.5f;
