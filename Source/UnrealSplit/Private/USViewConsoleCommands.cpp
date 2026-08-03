@@ -3,6 +3,7 @@
 #include "CoreMinimal.h"
 
 #include "Camera/CameraActor.h"
+#include "Camera/PlayerCameraManager.h"
 #include "Engine/Engine.h"
 #include "Engine/GameInstance.h"
 #include "Engine/LocalPlayer.h"
@@ -10,14 +11,17 @@
 #include "EngineUtils.h"
 #include "GameFramework/Actor.h"
 #include "GameFramework/PlayerController.h"
+#include "GameFramework/PlayerState.h"
 #include "HAL/IConsoleManager.h"
 #include "UObject/Class.h"
 
 #include "USConsoleReport.h"
+#include "USGameViewportClient.h"
 #include "USRemoteViewSubsystem.h"
 #include "USShadowLocalPlayer.h"
 #include "USViewState.h"
 #include "USViewSubsystem.h"
+#include "USViewTypes.h"
 
 // Development-only driver for the view layer until level volumes and puzzle
 // logic call it. The console is compiled out of shipping builds, so these go
@@ -453,12 +457,94 @@ static FAutoConsoleCommandWithWorldArgsAndOutputDevice GUSViewStateCommand(
 		Report(Ar, FString::Printf(TEXT("Local views: %d (%d played by someone here). One view is laid out full screen; the split needs two."),
 			GEngine->GetNumGamePlayers(World), RealPlayers));
 
+		if (const UUSGameViewportClient* const Viewport = Cast<UUSGameViewportClient>(World->GetGameInstance()->GetGameViewportClient()))
+		{
+			TArray<ULocalPlayer*> Slots;
+			Viewport->GetLaidOutSlots(Slots);
+			const int32 Player1Slot = Viewport->FindPlayer1SlotIndex(Slots);
+			const bool bFixed = Viewport->GetViewOrderMode() == EUSViewOrderMode::Fixed;
+
+			Report(Ar, FString::Printf(TEXT("View order: %s on this machine (local only). Player1Share always means player 1's width%s."),
+				bFixed ? TEXT("fixed — server-assigned slots, player 1 left") : TEXT("own — this machine's player left"),
+				(!bFixed && Player1Slot == 1) ? TEXT("; player 1 is in the RIGHT slot here, so the ratio applies to the right") : TEXT("")));
+
+			for (int32 SlotIndex = 0; SlotIndex < Slots.Num(); ++SlotIndex)
+			{
+				const ULocalPlayer* const SlotPlayer = Slots[SlotIndex];
+				const APlayerState* const SlotState = UUSGameViewportClient::GetViewPlayerState(SlotPlayer);
+				const bool bShadow = UUSShadowLocalPlayer::IsShadow(SlotPlayer);
+				const bool bIsPlayer1 = SlotIndex == Player1Slot;
+				const int32 AssignedSlot = UUSGameViewportClient::GetAssignedViewSlot(SlotPlayer);
+
+				// Field of view per slot, because two views of the same kind of camera
+				// that differ here are framed differently, and eyeballing which one is
+				// "closer" cannot tell a wrong field of view from a spring arm that is
+				// simply pulled in by nearby geometry.
+				const APlayerController* const SlotController = SlotPlayer != nullptr ? SlotPlayer->PlayerController : nullptr;
+				const APlayerCameraManager* const SlotCamera = SlotController != nullptr ? SlotController->PlayerCameraManager : nullptr;
+
+				// The assigned slot is the number the ordering actually runs on, so it
+				// is worth seeing next to the name: a stream still showing "-" is why
+				// a machine is laid out in creation order rather than by identity.
+				Report(Ar, FString::Printf(TEXT("  Slot %d (%s): %s '%s' (PlayerId %s, assigned slot %s, FOV %s)%s"),
+					SlotIndex,
+					SlotIndex == 0 ? TEXT("left") : TEXT("right"),
+					bShadow ? TEXT("shadow of") : TEXT("local"),
+					SlotState != nullptr ? *SlotState->GetPlayerName() : TEXT("<no identity yet>"),
+					SlotState != nullptr && SlotState->GetPlayerId() > 0
+						? *FString::FromInt(SlotState->GetPlayerId())
+						: TEXT("?"),
+					AssignedSlot != INDEX_NONE ? *FString::FromInt(AssignedSlot) : TEXT("-"),
+					SlotCamera != nullptr ? *FString::Printf(TEXT("%.2f"), SlotCamera->GetFOVAngle()) : TEXT("?"),
+					bIsPlayer1 ? TEXT(" — player 1") : TEXT("")));
+			}
+		}
+
 		if (const UUSRemoteViewSubsystem* const RemoteView = World->GetGameInstance()->GetSubsystem<UUSRemoteViewSubsystem>())
 		{
 			Report(Ar, FString::Printf(TEXT("Remote view: %s on this machine; shadow view %s"),
 				RemoteView->IsRemoteViewEnabled() ? TEXT("enabled") : TEXT("disabled (US.RemoteView on)"),
 				*RemoteView->DescribeShadowViewState()));
 		}
+	}));
+
+static FAutoConsoleCommandWithWorldArgsAndOutputDevice GUSViewOrderCommand(
+	TEXT("US.ViewOrder"),
+	TEXT("UnrealSplit: left-to-right view order on this machine only. Usage: US.ViewOrder [fixed|own]. fixed = player identity (host/player 1 always left); own = this machine's player left. Never replicated and never changes Player1Share semantics."),
+	FConsoleCommandWithWorldArgsAndOutputDeviceDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World, FOutputDevice& Ar)
+	{
+		UGameInstance* const GameInstance = World != nullptr ? World->GetGameInstance() : nullptr;
+		UUSGameViewportClient* const Viewport = GameInstance != nullptr
+			? Cast<UUSGameViewportClient>(GameInstance->GetGameViewportClient())
+			: nullptr;
+
+		if (Viewport == nullptr)
+		{
+			ReportWarning(Ar, TEXT("US.ViewOrder: no UUSGameViewportClient on this world."));
+			return;
+		}
+
+		if (Args.Num() == 0)
+		{
+			Report(Ar, FString::Printf(TEXT("US.ViewOrder: %s on this machine."),
+				Viewport->GetViewOrderMode() == EUSViewOrderMode::Fixed ? TEXT("fixed") : TEXT("own")));
+			return;
+		}
+
+		const FString& Argument = Args[0];
+		const bool bWantsFixed = Argument.Equals(TEXT("fixed"), ESearchCase::IgnoreCase);
+		const bool bWantsOwn = Argument.Equals(TEXT("own"), ESearchCase::IgnoreCase);
+
+		if (!bWantsFixed && !bWantsOwn)
+		{
+			ReportWarning(Ar, FString::Printf(TEXT("US.ViewOrder: '%s' is neither fixed nor own. Usage: US.ViewOrder [fixed|own]."), *Argument));
+			return;
+		}
+
+		Viewport->SetViewOrderMode(bWantsFixed ? EUSViewOrderMode::Fixed : EUSViewOrderMode::Own);
+
+		Report(Ar, FString::Printf(TEXT("US.ViewOrder: %s. Player1Share still means player 1's width."),
+			bWantsFixed ? TEXT("fixed (player identity, host left)") : TEXT("own (this machine's player left)")));
 	}));
 
 static FAutoConsoleCommandWithWorldArgsAndOutputDevice GUSRemoteViewCommand(

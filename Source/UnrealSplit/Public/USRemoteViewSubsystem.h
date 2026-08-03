@@ -3,6 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "GameFramework/OnlineReplStructs.h"
 #include "Subsystems/GameInstanceSubsystem.h"
 #include "USRemoteViewSubsystem.generated.h"
 
@@ -29,9 +30,9 @@ class UWorld;
  *     turn a received stream into a scene view the renderer will draw.
  *
  * Layout is not its business. The 1.5 slot maths is driven by how many local
- * views exist, so adding the shadow player is the whole of what puts the partner
- * on the right-hand side of the screen; not a line of UUSGameViewportClient
- * changed for this.
+ * views exist and by the viewport's view-order mode, so adding the shadow player
+ * is the whole of what creates a second slot — which side it lands on is decided
+ * by identity sort (Fixed) or creation order (Own), not here.
  *
  * Separate from UUSViewSubsystem on purpose. That subsystem answers "how is the
  * screen divided", which is replicated, authoritative and identical everywhere.
@@ -121,6 +122,24 @@ private:
 	/** Server side: gives a player that just logged in a stream of its own. */
 	void EnsureViewProxyForPlayer(APlayerController* PlayerController);
 
+	/**
+	 * Server side: the view slot this player owns for the rest of the session.
+	 *
+	 * The whole point of deciding this here is that this object outlives worlds, so
+	 * a slot survives level travel, and outlives a connection, so a player who
+	 * leaves and comes back is put back on the side they were on. Both are things a
+	 * receiver cannot work out for itself from replicated player state, whose
+	 * numbering the engine is free to reassign on rejoin.
+	 *
+	 * Keyed on the online identity where there is one. Without one — standalone or
+	 * a LAN session with no login — it degrades to join order, which is all the
+	 * identity that exists in that case and is what the pre-1.6 code did anyway.
+	 */
+	int32 AssignViewSlot(const APlayerController* PlayerController);
+
+	/** True while a live stream already sits in this slot. */
+	bool IsViewSlotTaken(int32 SlotIndex) const;
+
 	UPROPERTY(Transient)
 	TObjectPtr<UUSShadowLocalPlayer> ShadowPlayer;
 
@@ -133,6 +152,15 @@ private:
 	/** Proxies this machine spawned as the authority, so logout can clean them up. */
 	UPROPERTY(Transient)
 	TMap<TObjectPtr<APlayerController>, TObjectPtr<AUSPlayerViewProxy>> ViewProxies;
+
+	/**
+	 * Authority side: who owns which view slot, indexed by slot.
+	 *
+	 * Never cleared on logout — holding a departed player's claim is exactly what
+	 * lets a reconnect land back on the same side. A slot is only handed to someone
+	 * else once nobody is streaming from it.
+	 */
+	TArray<FUniqueNetIdRepl> ViewSlotOwners;
 
 	/**
 	 * Guards the local-player events against the shadow player's own creation:

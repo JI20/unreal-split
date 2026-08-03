@@ -10,6 +10,7 @@
 #include "EngineUtils.h"
 #include "GameFramework/GameModeBase.h"
 #include "GameFramework/PlayerController.h"
+#include "GameFramework/PlayerState.h"
 #include "GenericPlatform/GenericPlatformInputDeviceMapper.h"
 
 #include "UnrealSplitModule.h"
@@ -288,9 +289,9 @@ bool UUSRemoteViewSubsystem::CreateShadowView(AUSPlayerViewProxy* Source)
 	// ULocalPlayer with none of the guards this needs — and which sends a split
 	// join on a client.
 	UUSShadowLocalPlayer* const NewShadowPlayer = NewObject<UUSShadowLocalPlayer>(GEngine, UUSShadowLocalPlayer::StaticClass());
-	const int32 SlotIndex = GameInstance->AddLocalPlayer(NewShadowPlayer, ShadowUserId);
+	const int32 LocalPlayerIndex = GameInstance->AddLocalPlayer(NewShadowPlayer, ShadowUserId);
 
-	if (SlotIndex == INDEX_NONE)
+	if (LocalPlayerIndex == INDEX_NONE)
 	{
 		LastShadowViewNote = TEXT("the engine refused to add the shadow local player");
 		UE_LOG(LogUnrealSplit, Warning, TEXT("Not creating a shadow view: %s."), *LastShadowViewNote);
@@ -321,10 +322,15 @@ bool UUSRemoteViewSubsystem::CreateShadowView(AUSPlayerViewProxy* Source)
 	ShadowSource = Source;
 	LastShadowViewNote.Reset();
 
-	UE_LOG(LogUnrealSplit, Log, TEXT("Shadow view created in slot %d for stream '%s' (player '%s'), platform user %d. This machine now renders %d view(s)."),
-		SlotIndex,
+	// Two different numbers, and it is worth logging both: the local player index is
+	// where the engine filed this view, while the view slot is where the layout will
+	// draw it — the authority chose that one for the streamed player, so on the two
+	// machines the same player lands on the same side.
+	UE_LOG(LogUnrealSplit, Log, TEXT("Shadow view created as local player %d for stream '%s' (player '%s', view slot %d), platform user %d. This machine now renders %d view(s)."),
+		LocalPlayerIndex,
 		*Source->GetName(),
 		*GetNameSafe(Source->GetOwningPlayerState()),
+		Source->GetViewSlotIndex(),
 		ShadowUserId.GetInternalId(),
 		GameInstance->GetNumLocalPlayers());
 
@@ -539,9 +545,64 @@ void UUSRemoteViewSubsystem::EnsureViewProxyForPlayer(APlayerController* PlayerC
 		return;
 	}
 
-	Proxy->InitializeForPlayer(PlayerController);
+	const int32 SlotIndex = AssignViewSlot(PlayerController);
+
+	Proxy->InitializeForPlayer(PlayerController, SlotIndex);
 	ViewProxies.Add(PlayerController, Proxy);
 
-	UE_LOG(LogUnrealSplit, Log, TEXT("Camera stream '%s' created for '%s' (%d stream(s) in this world)."),
-		*Proxy->GetName(), *PlayerController->GetName(), ViewProxies.Num());
+	UE_LOG(LogUnrealSplit, Log, TEXT("Camera stream '%s' created for '%s' in view slot %d (%d stream(s) in this world)."),
+		*Proxy->GetName(), *PlayerController->GetName(), SlotIndex, ViewProxies.Num());
+}
+
+bool UUSRemoteViewSubsystem::IsViewSlotTaken(int32 SlotIndex) const
+{
+	for (const TPair<TObjectPtr<APlayerController>, TObjectPtr<AUSPlayerViewProxy>>& Pair : ViewProxies)
+	{
+		const AUSPlayerViewProxy* const Proxy = Pair.Value.Get();
+
+		if (Proxy != nullptr && Proxy->GetViewSlotIndex() == SlotIndex)
+		{
+			return true;
+		}
+	}
+
+	return false;
+}
+
+int32 UUSRemoteViewSubsystem::AssignViewSlot(const APlayerController* PlayerController)
+{
+	const APlayerState* const PlayerState = PlayerController != nullptr ? PlayerController->PlayerState : nullptr;
+	const FUniqueNetIdRepl Identity = PlayerState != nullptr ? PlayerState->GetUniqueId() : FUniqueNetIdRepl();
+
+	if (Identity.IsValid())
+	{
+		const int32 PreviousSlot = ViewSlotOwners.IndexOfByPredicate(
+			[&Identity](const FUniqueNetIdRepl& Owner)
+			{
+				return Owner.IsValid() && Owner == Identity;
+			});
+
+		// Somebody else may have been given the slot while this player was away, in
+		// which case the old claim is stale and it takes a free one below.
+		if (PreviousSlot != INDEX_NONE && !IsViewSlotTaken(PreviousSlot))
+		{
+			return PreviousSlot;
+		}
+	}
+
+	int32 FreeSlot = 0;
+
+	while (IsViewSlotTaken(FreeSlot))
+	{
+		++FreeSlot;
+	}
+
+	if (!ViewSlotOwners.IsValidIndex(FreeSlot))
+	{
+		ViewSlotOwners.SetNum(FreeSlot + 1);
+	}
+
+	ViewSlotOwners[FreeSlot] = Identity;
+
+	return FreeSlot;
 }

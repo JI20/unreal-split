@@ -18,7 +18,7 @@ namespace
 	{
 		OutView.Location = Sample.Location;
 		OutView.Rotation = Sample.GetRotation();
-		OutView.FOV = static_cast<float>(Sample.FieldOfViewDegrees);
+		OutView.FOV = Sample.GetFieldOfView();
 	}
 }
 
@@ -109,9 +109,15 @@ void AUSPlayerViewProxy::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& O
 	// somebody else's.
 	DOREPLIFETIME_CONDITION(AUSPlayerViewProxy, ViewSample, COND_SkipOwner);
 	DOREPLIFETIME(AUSPlayerViewProxy, OwningPlayerState);
+	DOREPLIFETIME(AUSPlayerViewProxy, ViewSlotIndex);
 }
 
-void AUSPlayerViewProxy::InitializeForPlayer(APlayerController* OwningController)
+int32 AUSPlayerViewProxy::GetViewSlotIndex() const
+{
+	return ViewSlotIndex != MAX_uint8 ? static_cast<int32>(ViewSlotIndex) : INDEX_NONE;
+}
+
+void AUSPlayerViewProxy::InitializeForPlayer(APlayerController* OwningController, int32 AssignedViewSlotIndex)
 {
 	if (!HasAuthority())
 	{
@@ -129,6 +135,10 @@ void AUSPlayerViewProxy::InitializeForPlayer(APlayerController* OwningController
 	// unreliable server RPC is only legal from the machine that owns the actor.
 	SetOwner(OwningController);
 	OwningPlayerState = OwningController->PlayerState;
+
+	ViewSlotIndex = (AssignedViewSlotIndex >= 0 && AssignedViewSlotIndex < MAX_uint8)
+		? static_cast<uint8>(AssignedViewSlotIndex)
+		: MAX_uint8;
 }
 
 bool AUSPlayerViewProxy::IsSendingMachine() const
@@ -179,7 +189,7 @@ void AUSPlayerViewProxy::SampleAndSend()
 	FUSViewSample Sample;
 	Sample.Location = CameraManager->GetCameraLocation();
 	Sample.SetRotation(CameraManager->GetCameraRotation());
-	Sample.FieldOfViewDegrees = static_cast<uint8>(FMath::Clamp(FMath::RoundToInt(CameraManager->GetFOVAngle()), 1, 255));
+	Sample.SetFieldOfView(CameraManager->GetFOVAngle());
 
 	// Taken now rather than when this is written into the property or arrives, so
 	// the receiver can reconstruct the cadence this machine actually sampled at.
@@ -216,7 +226,7 @@ bool AUSPlayerViewProxy::ServerUpdateViewSample_Validate(FUSViewSample Sample)
 	// point one spectator view somewhere absurd. A non-finite one would reach the
 	// renderer through the interpolator, though, so it is refused outright rather
 	// than clamped into something plausible-looking.
-	return !Sample.Location.ContainsNaN() && Sample.FieldOfViewDegrees > 0;
+	return !Sample.Location.ContainsNaN() && Sample.CompressedFieldOfView > 0;
 }
 
 void AUSPlayerViewProxy::ServerUpdateViewSample_Implementation(FUSViewSample Sample)
@@ -481,10 +491,7 @@ bool AUSPlayerViewProxy::GetInterpolatedView(FMinimalViewInfo& OutView)
 			After.Sample.GetRotation().Quaternion(),
 			Alpha).Rotator();
 
-		OutView.FOV = FMath::Lerp(
-			static_cast<float>(Before.Sample.FieldOfViewDegrees),
-			static_cast<float>(After.Sample.FieldOfViewDegrees),
-			Alpha);
+		OutView.FOV = FMath::Lerp(Before.Sample.GetFieldOfView(), After.Sample.GetFieldOfView(), Alpha);
 
 		return true;
 	}

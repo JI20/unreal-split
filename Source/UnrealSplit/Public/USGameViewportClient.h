@@ -8,6 +8,7 @@
 #include "USGameViewportClient.generated.h"
 
 class APlayerController;
+class APlayerState;
 class ULocalPlayer;
 
 /**
@@ -31,8 +32,14 @@ class ULocalPlayer;
  * into this viewport. One — a machine whose partner's camera stream has not
  * started delivering yet, or one with the remote view switched off — is a
  * full-screen layout, not a broken split.
+ *
+ * Slot order is presentation, not identity. By default each view sits in the slot
+ * the server assigned the player it shows, so every machine paints the same
+ * left/right framing. Player1Share always means that player's width: when a
+ * machine opts into "own" order and puts player 1 on the right, the ratio is
+ * applied to the right slot rather than to the left edge of the screen.
  */
-UCLASS()
+UCLASS(Config = Game)
 class UNREALSPLIT_API UUSGameViewportClient : public UGameViewportClient
 {
 	GENERATED_BODY()
@@ -42,6 +49,42 @@ public:
 	virtual void Tick(float DeltaTime) override;
 	virtual void LayoutPlayers() override;
 	//~ End UGameViewportClient interface
+
+	/**
+	 * Local presentation: who sits on the left of this machine's split.
+	 *
+	 * Unreplicated on purpose — the intent still says "player 1's share", and each
+	 * machine maps that share onto whichever of its slots currently holds player 1.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "UnrealSplit|View")
+	void SetViewOrderMode(EUSViewOrderMode NewMode);
+
+	UFUNCTION(BlueprintPure, Category = "UnrealSplit|View")
+	EUSViewOrderMode GetViewOrderMode() const { return ViewOrderMode; }
+
+	/** Left-to-right slots as currently laid out, for diagnostics. */
+	void GetLaidOutSlots(TArray<ULocalPlayer*>& OutSlots) const;
+
+	/**
+	 * Index in the laid-out slots of the view that represents player 1 — the player
+	 * the authority put in slot 0. INDEX_NONE only when there are no slots at all;
+	 * with nothing better to go on it answers 0, since local creation order is join
+	 * order on the one machine that has no stream to read an assignment from.
+	 */
+	int32 FindPlayer1SlotIndex(const TArray<ULocalPlayer*>& Slots) const;
+
+	/** The PlayerState of the player a view shows, or null when unknown. */
+	static APlayerState* GetViewPlayerState(const ULocalPlayer* Player);
+
+	/**
+	 * The slot the authority gave the player a view shows, or INDEX_NONE when this
+	 * machine cannot know it.
+	 *
+	 * Only a shadow view can answer, because the assignment travels on the camera
+	 * stream it renders. That is enough for a two-view layout: the local player
+	 * takes whichever slot the shadow did not.
+	 */
+	static int32 GetAssignedViewSlot(const ULocalPlayer* Player);
 
 	/**
 	 * Takes a new intent as the blend target. Called on every machine, from
@@ -96,10 +139,23 @@ private:
 	/** Points every local view at the merged target, or puts them back. */
 	void UpdateMergedViewTargets();
 
-	/** Origin/size of one slot, given how many slots this viewport has. */
-	void ComputeSlotRect(int32 SlotIndex, int32 NumSlots, float& OutOriginX, float& OutSizeX) const;
+	/**
+	 * Origin/size of one slot.
+	 *
+	 * Player1SlotIndex is which of the laid-out slots represents player 1: that
+	 * slot gets CurrentShare of the width, and the left edge of the split is
+	 * derived from whether player 1 is currently on the left or the right. Slot 0
+	 * is never assumed to be player 1.
+	 */
+	void ComputeSlotRect(int32 SlotIndex, int32 NumSlots, int32 Player1SlotIndex, float& OutOriginX, float& OutSizeX) const;
 
-	/** Local players that render into this viewport, slot order; slot 0 is player 1. */
+	/**
+	 * Local players that render into this viewport, left-to-right.
+	 *
+	 * Order is ViewOrderMode: Fixed puts each view in the slot the authority
+	 * assigned the player it shows, so both machines frame the pair the same way;
+	 * Own keeps engine creation order so this machine's own player stays left.
+	 */
 	void GatherSlots(TArray<ULocalPlayer*>& OutSlots) const;
 
 	/**
@@ -109,6 +165,13 @@ private:
 	 */
 	UPROPERTY()
 	FUSViewIntent TargetIntent;
+
+	/**
+	 * Left-to-right presentation. Default Fixed so both machines show the same
+	 * framing; Own restores "my player on the left" for machines that want it.
+	 */
+	UPROPERTY(Config)
+	EUSViewOrderMode ViewOrderMode = EUSViewOrderMode::Fixed;
 
 	/** Blend bookkeeping. All of it local; none of it replicates. */
 	float CurrentShare = 0.5f;

@@ -74,6 +74,12 @@ public:
 	//~ End APlayerController interface
 
 private:
+	/**
+	 * Copies the parts of the projection a stream does not carry from this
+	 * machine's own camera, so both views are framed by the same rules.
+	 */
+	void ApplyLocalProjectionSettings(FMinimalViewInfo& OutResult) const;
+
 	UPROPERTY()
 	TObjectPtr<AUSPlayerViewProxy> ViewProxy;
 

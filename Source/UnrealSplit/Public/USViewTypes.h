@@ -33,6 +33,30 @@ enum class EUSViewEasing : uint8
 };
 
 /**
+ * How this machine orders the views left-to-right.
+ *
+ * Presentation only: never replicated, never changes FUSViewIntent, and never
+ * changes what Player1Share means. Player1Share is always "player 1's width",
+ * and the viewport maps that width onto whichever slot currently holds player 1.
+ */
+UENUM(BlueprintType)
+enum class EUSViewOrderMode : uint8
+{
+	/**
+	 * Player identity. Lowest APlayerState::PlayerId on the left on every machine,
+	 * so both screens show the same framing (host / first joiner left).
+	 */
+	Fixed,
+
+	/**
+	 * Local-player creation order. This machine's own player stays left; the
+	 * partner's shadow view lands on the right. The pre-1.6 behaviour, kept as an
+	 * option — on a client that mirrors the framing between machines.
+	 */
+	Own
+};
+
+/**
  * The authoritative, shared screen layout for a co-op session — the complete
  * answer to "how is the screen divided right now".
  *
@@ -120,9 +144,17 @@ struct FUSViewSample
 	UPROPERTY()
 	uint16 CompressedRoll = 0;
 
-	/** Horizontal field of view in whole degrees. */
-	UPROPERTY(BlueprintReadOnly, Category = "UnrealSplit|View")
-	uint8 FieldOfViewDegrees = 90;
+	/**
+	 * Horizontal field of view in hundredths of a degree.
+	 *
+	 * Whole degrees would be a byte, and it is tempting because half a degree
+	 * sounds invisible — it is not. Both views sit side by side on one screen
+	 * showing the same kind of camera, and half a degree of field of view is a
+	 * visible difference in how far away the character looks when you can compare
+	 * the two directly. A hundredth of a degree cannot be seen and costs one byte.
+	 */
+	UPROPERTY()
+	uint16 CompressedFieldOfView = 9000;
 
 	/**
 	 * When the sending machine took this sample, in milliseconds since that
@@ -169,5 +201,15 @@ struct FUSViewSample
 		CompressedPitch = FRotator::CompressAxisToShort(Rotation.Pitch);
 		CompressedYaw = FRotator::CompressAxisToShort(Rotation.Yaw);
 		CompressedRoll = FRotator::CompressAxisToShort(Rotation.Roll);
+	}
+
+	float GetFieldOfView() const
+	{
+		return static_cast<float>(CompressedFieldOfView) / 100.0f;
+	}
+
+	void SetFieldOfView(float FieldOfView)
+	{
+		CompressedFieldOfView = static_cast<uint16>(FMath::Clamp(FMath::RoundToInt(FieldOfView * 100.0f), 1, MAX_uint16));
 	}
 };

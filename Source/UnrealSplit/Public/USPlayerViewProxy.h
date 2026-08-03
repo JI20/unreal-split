@@ -57,8 +57,26 @@ public:
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 	//~ End AActor interface
 
-	/** Server-side setup: whose camera this carries. */
-	void InitializeForPlayer(APlayerController* OwningController);
+	/**
+	 * Server-side setup: whose camera this carries, and which view slot that player
+	 * owns for the rest of the session.
+	 *
+	 * The slot is decided once, by the authority, from an identity the server keeps
+	 * for the whole game instance — not derived on the receiver. That is what makes
+	 * left/right agree on both machines and survive travel and rejoin: a receiver
+	 * never has to guess an ordering from state that can be renumbered underneath it.
+	 */
+	void InitializeForPlayer(APlayerController* OwningController, int32 AssignedViewSlotIndex);
+
+	/**
+	 * The view slot this player owns, or INDEX_NONE before it has replicated.
+	 *
+	 * Plain replicated data rather than an actor reference, so it is readable from
+	 * the proxy's very first update — an actor reference such as OwningPlayerState
+	 * can take further updates to resolve, and ordering that waited for it would
+	 * paint one framing and then swap.
+	 */
+	int32 GetViewSlotIndex() const;
 
 	/**
 	 * True on the one machine where this player is a local player, which is the
@@ -155,6 +173,13 @@ private:
 	/** Which player this is, so a machine can tell one stream from another. */
 	UPROPERTY(Replicated)
 	TObjectPtr<APlayerState> OwningPlayerState;
+
+	/**
+	 * Which view slot this player owns, authority-assigned. MAX_uint8 until then,
+	 * which reads as INDEX_NONE through the accessor.
+	 */
+	UPROPERTY(Replicated)
+	uint8 ViewSlotIndex = MAX_uint8;
 
 	/** Moves the playback clock on by one frame and reports where it now points. */
 	double AdvancePlaybackClock();

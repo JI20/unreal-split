@@ -75,14 +75,65 @@ void AUSSpectatorPlayerController::SetViewProxy(AUSPlayerViewProxy* Proxy)
 	ViewProxy = Proxy;
 	bHasKnownView = false;
 
-	// Its own view target, so APlayerCameraManager::UpdateViewTarget resolves the
-	// view through CalcCamera rather than through a pawn or a camera component.
-	SetViewTarget(this);
+	// The view target is deliberately not touched here. This controller is already
+	// its own view target — APlayerCameraManager::InitializeFor points a fresh
+	// camera manager at its owning controller, which is what makes
+	// UpdateViewTarget resolve the view through CalcCamera below rather than
+	// through a pawn or a camera component.
+	//
+	// It also must not be touched, because while merged the view target belongs to
+	// the viewport client: it points every view at the game's camera and remembers
+	// what to put back. Re-pointing at this controller here — swapping the stream
+	// mid-merge is possible — would undo that silently, and the viewport, believing
+	// the merge already applied, would never reissue it.
 }
 
 AUSPlayerViewProxy* AUSSpectatorPlayerController::GetViewProxy() const
 {
 	return ViewProxy.Get();
+}
+
+void AUSSpectatorPlayerController::ApplyLocalProjectionSettings(FMinimalViewInfo& OutResult) const
+{
+	// A stream carries a camera's position, orientation and field of view, and
+	// nothing else — which leaves everything else about the projection at
+	// APlayerCameraManager's defaults, because that is what seeded this view info
+	// before CalcCamera was called. The game's own camera sets more than that: an
+	// aspect-ratio axis constraint override, a constrained aspect ratio, an
+	// orthographic mode. Those change how far away the same camera at the same
+	// field of view appears to be, so a view left on defaults is framed
+	// differently from the one it is meant to be a copy of, side by side on the
+	// same screen.
+	//
+	// They are taken from this machine's own camera rather than sent, because both
+	// players run the same camera rig — that is what a co-op game means here — so
+	// the local camera is an exact description of the remote one in every respect
+	// the stream does not carry, at no bandwidth. A game that gave its two players
+	// genuinely different projections would need these on the wire instead.
+	const APlayerController* const RealController = UUSShadowLocalPlayer::GetFirstRealLocalPlayerController(GetGameInstance());
+	const APlayerCameraManager* const RealCamera = RealController != nullptr && RealController != this
+		? RealController->PlayerCameraManager
+		: nullptr;
+
+	if (RealCamera == nullptr)
+	{
+		return;
+	}
+
+	const FMinimalViewInfo& LocalView = RealCamera->GetCameraCacheView();
+
+	OutResult.AspectRatio = LocalView.AspectRatio;
+	OutResult.bConstrainAspectRatio = LocalView.bConstrainAspectRatio;
+	OutResult.AspectRatioAxisConstraint = LocalView.AspectRatioAxisConstraint;
+	OutResult.ProjectionMode = LocalView.ProjectionMode;
+	OutResult.OrthoWidth = LocalView.OrthoWidth;
+	OutResult.OrthoNearClipPlane = LocalView.OrthoNearClipPlane;
+	OutResult.OrthoFarClipPlane = LocalView.OrthoFarClipPlane;
+	OutResult.bAutoCalculateOrthoPlanes = LocalView.bAutoCalculateOrthoPlanes;
+	OutResult.AutoPlaneShift = LocalView.AutoPlaneShift;
+	OutResult.bUpdateOrthoPlanes = LocalView.bUpdateOrthoPlanes;
+	OutResult.PerspectiveNearClipPlane = LocalView.PerspectiveNearClipPlane;
+	OutResult.bUseFieldOfViewForLOD = LocalView.bUseFieldOfViewForLOD;
 }
 
 void AUSSpectatorPlayerController::CalcCamera(float DeltaTime, FMinimalViewInfo& OutResult)
@@ -101,17 +152,20 @@ void AUSSpectatorPlayerController::CalcCamera(float DeltaTime, FMinimalViewInfo&
 		{
 			PlayerCameraManager->SetGameCameraCutThisFrame();
 		}
-
-		return;
 	}
-
-	if (bHasKnownView)
+	else if (bHasKnownView)
 	{
 		OutResult = LastKnownView;
-		return;
+	}
+	else
+	{
+		Super::CalcCamera(DeltaTime, OutResult);
 	}
 
-	Super::CalcCamera(DeltaTime, OutResult);
+	// Last, so it applies to a held frame and to the fallback view as well as to a
+	// fresh sample, and so the values are this frame's rather than the ones that
+	// happened to be current when a stalled stream last delivered.
+	ApplyLocalProjectionSettings(OutResult);
 }
 
 bool AUSSpectatorPlayerController::CanRestartPlayer()

@@ -7,9 +7,11 @@
 #include "Engine/LocalPlayer.h"
 #include "GameFramework/Actor.h"
 #include "GameFramework/PlayerController.h"
+#include "GameFramework/PlayerState.h"
 
 #include "UnrealSplitModule.h"
-#include "USShadowLocalPlayer.h"
+#include "USPlayerViewProxy.h"
+#include "USSpectatorPlayerController.h"
 
 namespace
 {
@@ -58,7 +60,9 @@ void UUSGameViewportClient::Tick(float DeltaTime)
 	// Both are re-run every frame rather than only when the intent changes: view
 	// targets and player controllers appear late on a joining client, so this is
 	// also how a merge that arrived before the local controller existed, or whose
-	// target actor was not yet relevant, eventually takes effect.
+	// target actor was not yet relevant, eventually takes effect. Slot order rides
+	// along, which is what keeps a view that changes stream — or a shadow view that
+	// appears at all — from waiting for the next intent to be placed.
 	UpdateMergedViewTargets();
 	LayoutPlayers();
 }
@@ -73,11 +77,13 @@ void UUSGameViewportClient::LayoutPlayers()
 	TArray<ULocalPlayer*> Slots;
 	GatherSlots(Slots);
 
+	const int32 Player1SlotIndex = FindPlayer1SlotIndex(Slots);
+
 	for (int32 SlotIndex = 0; SlotIndex < Slots.Num(); ++SlotIndex)
 	{
 		float OriginX = 0.0f;
 		float SizeX = 0.0f;
-		ComputeSlotRect(SlotIndex, Slots.Num(), OriginX, SizeX);
+		ComputeSlotRect(SlotIndex, Slots.Num(), Player1SlotIndex, OriginX, SizeX);
 
 		// A zero size is the engine's own way of saying "this player has no view":
 		// ULocalPlayer::CalcSceneView bails on it, so the collapsed side of the
@@ -137,6 +143,25 @@ void UUSGameViewportClient::SetSplitRatioLocal(float Player1Share)
 	BlendFromShare = CurrentShare;
 
 	LayoutPlayers();
+}
+
+void UUSGameViewportClient::SetViewOrderMode(EUSViewOrderMode NewMode)
+{
+	if (ViewOrderMode == NewMode)
+	{
+		return;
+	}
+
+	ViewOrderMode = NewMode;
+	UE_LOG(LogUnrealSplit, Log, TEXT("View order on this machine: %s."),
+		NewMode == EUSViewOrderMode::Fixed ? TEXT("fixed (player identity, host left)") : TEXT("own (this machine's player left)"));
+
+	LayoutPlayers();
+}
+
+void UUSGameViewportClient::GetLaidOutSlots(TArray<ULocalPlayer*>& OutSlots) const
+{
+	GatherSlots(OutSlots);
 }
 
 void UUSGameViewportClient::ResetForNewWorld()
@@ -208,20 +233,16 @@ void UUSGameViewportClient::UpdateMergedViewTargets()
 		return;
 	}
 
+	// Every view here, the shadow one included. A shadow view has no camera of its
+	// own, but a merge is the case where that stops mattering: merged means every
+	// view shows the actor the game named, and the one full-width slot that survives
+	// a merge may well be the shadow's, since sides are assigned by player identity
+	// rather than by which player is local. Left out, a client would go on watching
+	// the raw stream through a merge the host was showing correctly.
 	for (ULocalPlayer* Player : GEngine->GetGamePlayers(this))
 	{
 		APlayerController* const PlayerController = Player != nullptr ? Player->PlayerController : nullptr;
 		if (PlayerController == nullptr)
-		{
-			continue;
-		}
-
-		// A shadow view has no camera of its own to redirect: it shows whatever the
-		// partner's machine is looking at, and while merged its slot has no width
-		// and is not drawn at all. Pointing it at the merged target would achieve
-		// nothing visible and would leave a view target to restore afterwards that
-		// was never the partner's.
-		if (UUSShadowLocalPlayer::IsShadow(Player))
 		{
 			continue;
 		}
@@ -264,8 +285,9 @@ void UUSGameViewportClient::UpdateMergedViewTargets()
 		else if (Record != nullptr)
 		{
 			// Back to the player's own camera. A pre-merge target that has since
-			// been destroyed falls back to the controller, which the camera
-			// manager resolves to its pawn.
+			// been destroyed falls back to the controller, which the camera manager
+			// resolves through its pawn — or, for a shadow view, through CalcCamera
+			// back to the stream, which is also what its pre-merge target was.
 			AActor* const RestoreTarget = Record->PreMergeTarget.Get();
 			PlayerController->SetViewTarget(RestoreTarget != nullptr ? RestoreTarget : PlayerController, TransitionParams);
 			MergedViewTargetRecords.Remove(PlayerController);
@@ -273,7 +295,7 @@ void UUSGameViewportClient::UpdateMergedViewTargets()
 	}
 }
 
-void UUSGameViewportClient::ComputeSlotRect(int32 SlotIndex, int32 NumSlots, float& OutOriginX, float& OutSizeX) const
+void UUSGameViewportClient::ComputeSlotRect(int32 SlotIndex, int32 NumSlots, int32 Player1SlotIndex, float& OutOriginX, float& OutSizeX) const
 {
 	OutOriginX = 0.0f;
 	OutSizeX = 0.0f;
@@ -299,46 +321,146 @@ void UUSGameViewportClient::ComputeSlotRect(int32 SlotIndex, int32 NumSlots, flo
 		return;
 	}
 
-	float Share = FMath::Clamp(CurrentShare, 0.0f, 1.0f);
-	if (Share < MinSlotShare)
+	float Player1Share = FMath::Clamp(CurrentShare, 0.0f, 1.0f);
+	if (Player1Share < MinSlotShare)
 	{
-		Share = 0.0f;
+		Player1Share = 0.0f;
 	}
-	else if (Share > 1.0f - MinSlotShare)
+	else if (Player1Share > 1.0f - MinSlotShare)
 	{
-		Share = 1.0f;
+		Player1Share = 1.0f;
 	}
+
+	// Player1Share is "player 1's width", not "the left slot's width". When player 1
+	// sits on the right (Own order on a client), the left edge of the split is at
+	// (1 - Player1Share) so that player still receives exactly Player1Share of the
+	// screen — and a ratio of 1.0 still collapses the other view to nothing.
+	const int32 EffectivePlayer1Slot = Player1SlotIndex != INDEX_NONE ? Player1SlotIndex : 0;
+	const float LeftShare = (EffectivePlayer1Slot == 0) ? Player1Share : (1.0f - Player1Share);
 
 	if (SlotIndex == 0)
 	{
 		OutOriginX = 0.0f;
-		OutSizeX = Share;
+		OutSizeX = LeftShare;
 	}
 	else if (SlotIndex == 1)
 	{
-		OutOriginX = Share;
-		OutSizeX = 1.0f - Share;
+		OutOriginX = LeftShare;
+		OutSizeX = 1.0f - LeftShare;
 	}
 	// Slots beyond the second get nothing. The game caps a session at two players
 	// in total, so a third local view is a bug elsewhere rather than a layout this
 	// has to invent; it stays black instead of silently overlapping the others.
 }
 
+APlayerState* UUSGameViewportClient::GetViewPlayerState(const ULocalPlayer* Player)
+{
+	if (Player == nullptr)
+	{
+		return nullptr;
+	}
+
+	// A shadow view has no PlayerState of its own — that is the isolation. The
+	// player it shows is the one the stream belongs to, carried on the proxy.
+	if (const AUSSpectatorPlayerController* const Spectator = Cast<AUSSpectatorPlayerController>(Player->PlayerController))
+	{
+		if (const AUSPlayerViewProxy* const Proxy = Spectator->GetViewProxy())
+		{
+			return Proxy->GetOwningPlayerState();
+		}
+
+		return nullptr;
+	}
+
+	const APlayerController* const Controller = Player->PlayerController;
+	return Controller != nullptr ? Controller->PlayerState : nullptr;
+}
+
+int32 UUSGameViewportClient::GetAssignedViewSlot(const ULocalPlayer* Player)
+{
+	if (Player == nullptr)
+	{
+		return INDEX_NONE;
+	}
+
+	// Only a shadow view can answer this, and it is the only one that has to.
+	// The slot is a number the server chose for the streamed player and put on the
+	// stream, so it is available on the machine that receives it; the machine's own
+	// player has no such stream to read locally. Two views is the whole range this
+	// game can produce, so knowing one side names the other.
+	if (const AUSSpectatorPlayerController* const Spectator = Cast<AUSSpectatorPlayerController>(Player->PlayerController))
+	{
+		if (const AUSPlayerViewProxy* const Proxy = Spectator->GetViewProxy())
+		{
+			return Proxy->GetViewSlotIndex();
+		}
+	}
+
+	return INDEX_NONE;
+}
+
+int32 UUSGameViewportClient::FindPlayer1SlotIndex(const TArray<ULocalPlayer*>& Slots) const
+{
+	if (Slots.Num() == 0)
+	{
+		return INDEX_NONE;
+	}
+
+	if (Slots.Num() == 2)
+	{
+		for (int32 SlotIndex = 0; SlotIndex < 2; ++SlotIndex)
+		{
+			const int32 AssignedSlot = GetAssignedViewSlot(Slots[SlotIndex]);
+			if (!Slots.IsValidIndex(AssignedSlot))
+			{
+				continue;
+			}
+
+			// The other view is whoever this one is not, so a known slot on either
+			// side settles both: player 1 is this view when the server gave it
+			// slot 0, and the opposite view otherwise.
+			return AssignedSlot == 0 ? SlotIndex : 1 - SlotIndex;
+		}
+	}
+
+	// Couch, or a stream that has not said which slot it owns yet. Local creation
+	// order is join order here, so the first view is player 1 — which is also the
+	// pre-1.6 answer, and why a couch session is unaffected by any of this.
+	return 0;
+}
+
 void UUSGameViewportClient::GatherSlots(TArray<ULocalPlayer*>& OutSlots) const
 {
 	OutSlots.Reset();
 
-	// Engine order is slot order, and it is the same order US.AddLocalPlayer and
-	// the input routing subsystem talk about, so "player 1" means one thing
-	// everywhere: slot 0. A shadow view is appended like any other local player
-	// and therefore lands in the last slot, which is what puts the remote partner
-	// on the right-hand side of the screen without a line of layout code knowing
-	// that it is remote.
 	for (ULocalPlayer* Player : GEngine->GetGamePlayers(this))
 	{
 		if (Player != nullptr && Player->GetViewportClient() == this)
 		{
 			OutSlots.Add(Player);
+		}
+	}
+
+	// Own keeps engine creation order: the first real local player was added first
+	// and the shadow view second, which reads as "my player on the left". Fewer
+	// than two views, or more than this game can produce, have nothing to sort.
+	if (ViewOrderMode == EUSViewOrderMode::Own || OutSlots.Num() != 2)
+	{
+		return;
+	}
+
+	// Fixed: the shadow view goes to the slot the authority gave the player it
+	// shows, and the local player takes the other one. Both machines put the same
+	// player on the same side because both are reading the same replicated number,
+	// not each inferring an order from state the engine may renumber.
+	for (int32 SlotIndex = 0; SlotIndex < 2; ++SlotIndex)
+	{
+		const int32 AssignedSlot = GetAssignedViewSlot(OutSlots[SlotIndex]);
+
+		if (OutSlots.IsValidIndex(AssignedSlot) && AssignedSlot != SlotIndex)
+		{
+			Swap(OutSlots[0], OutSlots[1]);
+			return;
 		}
 	}
 }
