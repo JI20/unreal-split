@@ -18,7 +18,7 @@
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUSSessionCapacityTwoLocalsRefuseThirdTest,
 	"UnrealSplit.Session.Capacity.TwoLocalsRefuseThird",
-	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ClientContext | EAutomationTestFlags::ProductFilter)
 
 bool FUSSessionCapacityTwoLocalsRefuseThirdTest::RunTest(const FString& Parameters)
 {
@@ -61,7 +61,7 @@ bool FUSSessionCapacityTwoLocalsRefuseThirdTest::RunTest(const FString& Paramete
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUSSessionCapacitySlotRecyclingTest,
 	"UnrealSplit.Session.Capacity.SlotRecycling",
-	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ClientContext | EAutomationTestFlags::ProductFilter)
 
 bool FUSSessionCapacitySlotRecyclingTest::RunTest(const FString& Parameters)
 {
@@ -100,7 +100,7 @@ bool FUSSessionCapacitySlotRecyclingTest::RunTest(const FString& Parameters)
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUSSessionCapacityHostClampDegenerateTest,
 	"UnrealSplit.Session.Capacity.HostClampDegenerate",
-	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ClientContext | EAutomationTestFlags::ProductFilter)
 
 bool FUSSessionCapacityHostClampDegenerateTest::RunTest(const FString& Parameters)
 {

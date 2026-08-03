@@ -17,7 +17,7 @@
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUSSessionLifecycleHostSucceedsTest,
 	"UnrealSplit.Session.Lifecycle.HostSucceeds",
-	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ClientContext | EAutomationTestFlags::ProductFilter)
 
 bool FUSSessionLifecycleHostSucceedsTest::RunTest(const FString& Parameters)
 {
@@ -50,7 +50,7 @@ bool FUSSessionLifecycleHostSucceedsTest::RunTest(const FString& Parameters)
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUSSessionLifecycleHostLeaveIdleTest,
 	"UnrealSplit.Session.Lifecycle.HostLeaveIdle",
-	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ClientContext | EAutomationTestFlags::ProductFilter)
 
 bool FUSSessionLifecycleHostLeaveIdleTest::RunTest(const FString& Parameters)
 {
@@ -82,7 +82,7 @@ bool FUSSessionLifecycleHostLeaveIdleTest::RunTest(const FString& Parameters)
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUSSessionLifecycleHostLeaveHostAgainTest,
 	"UnrealSplit.Session.Lifecycle.HostLeaveHostAgain",
-	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ClientContext | EAutomationTestFlags::ProductFilter)
 
 bool FUSSessionLifecycleHostLeaveHostAgainTest::RunTest(const FString& Parameters)
 {

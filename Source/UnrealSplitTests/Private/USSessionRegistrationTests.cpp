@@ -22,7 +22,7 @@
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUSSessionRegistrationPrimaryRemovalRefusedTest,
 	"UnrealSplit.Session.Registration.PrimaryRemovalRefused",
-	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ClientContext | EAutomationTestFlags::ProductFilter)
 
 bool FUSSessionRegistrationPrimaryRemovalRefusedTest::RunTest(const FString& Parameters)
 {
@@ -49,7 +49,7 @@ bool FUSSessionRegistrationPrimaryRemovalRefusedTest::RunTest(const FString& Par
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUSSessionRegistrationSecondaryRemovalTest,
 	"UnrealSplit.Session.Registration.SecondaryRemoval",
-	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ClientContext | EAutomationTestFlags::ProductFilter)
 
 bool FUSSessionRegistrationSecondaryRemovalTest::RunTest(const FString& Parameters)
 {
@@ -84,7 +84,7 @@ bool FUSSessionRegistrationSecondaryRemovalTest::RunTest(const FString& Paramete
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUSSessionRegistrationDoubleUnregisterHarmlessTest,
 	"UnrealSplit.Session.Registration.DoubleUnregisterHarmless",
-	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ClientContext | EAutomationTestFlags::ProductFilter)
 
 bool FUSSessionRegistrationDoubleUnregisterHarmlessTest::RunTest(const FString& Parameters)
 {
@@ -119,7 +119,7 @@ bool FUSSessionRegistrationDoubleUnregisterHarmlessTest::RunTest(const FString& 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUSSessionRegistrationDoubleRegisterNoDuplicateTest,
 	"UnrealSplit.Session.Registration.DoubleRegisterNoDuplicate",
-	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ClientContext | EAutomationTestFlags::ProductFilter)
 
 bool FUSSessionRegistrationDoubleRegisterNoDuplicateTest::RunTest(const FString& Parameters)
 {
@@ -197,7 +197,7 @@ bool FUSSessionRegistrationDoubleRegisterNoDuplicateTest::RunTest(const FString&
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUSSessionRegistrationUnregisterNeverRegisteredTest,
 	"UnrealSplit.Session.Registration.UnregisterNeverRegistered",
-	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ClientContext | EAutomationTestFlags::ProductFilter)
 
 bool FUSSessionRegistrationUnregisterNeverRegisteredTest::RunTest(const FString& Parameters)
 {

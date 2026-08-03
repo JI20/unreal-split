@@ -20,7 +20,7 @@
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUSSessionBusyLeaveWhileIdleTest,
 	"UnrealSplit.Session.Busy.LeaveWhileIdle",
-	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ClientContext | EAutomationTestFlags::ProductFilter)
 
 bool FUSSessionBusyLeaveWhileIdleTest::RunTest(const FString& Parameters)
 {
@@ -68,7 +68,7 @@ bool FUSSessionBusyLeaveWhileIdleTest::RunTest(const FString& Parameters)
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUSSessionBusyHostWhileHostingTest,
 	"UnrealSplit.Session.Busy.HostWhileHosting",
-	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ClientContext | EAutomationTestFlags::ProductFilter)
 
 bool FUSSessionBusyHostWhileHostingTest::RunTest(const FString& Parameters)
 {
@@ -137,7 +137,7 @@ bool FUSSessionBusyHostWhileHostingTest::RunTest(const FString& Parameters)
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUSSessionBusyJoinWhileHostingTest,
 	"UnrealSplit.Session.Busy.JoinWhileHosting",
-	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ClientContext | EAutomationTestFlags::ProductFilter)
 
 bool FUSSessionBusyJoinWhileHostingTest::RunTest(const FString& Parameters)
 {
@@ -198,7 +198,7 @@ bool FUSSessionBusyJoinWhileHostingTest::RunTest(const FString& Parameters)
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUSSessionBusyHostReentrancyNeverTwoSessionsTest,
 	"UnrealSplit.Session.Busy.HostReentrancyNeverTwoSessions",
-	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ClientContext | EAutomationTestFlags::ProductFilter)
 
 bool FUSSessionBusyHostReentrancyNeverTwoSessionsTest::RunTest(const FString& Parameters)
 {

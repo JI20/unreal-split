@@ -69,18 +69,30 @@ hosting reopens the current map as a listen server — that only works in a game
 world, so the tests never fabricate one. With no PIE running, every test logs
 `Skipped: no PIE/game world` and passes without touching anything.
 
-### Run in editor
+Tests must run in the **same process** as the game world. Two ways:
 
-1. Press Play (PIE), leave it running.
-2. Session Frontend → Automation → filter `UnrealSplit`, run selected. Or in the
-   console:
+### A. Standalone game (preferred)
+
+Play dropdown → **Standalone Game**. In the game window press `` ` `` and run:
 
 ```
 Automation RunTests UnrealSplit
 ```
 
-Expect PIE to travel during host/leave tests (listen reopen, then back to the
-entry map) — that is the flow under test, not a fault.
+The editor stays out of it entirely; travel happens in the throwaway process.
+
+### B. Play In Editor
+
+1. Press Play (PIE), leave it running.
+2. Session Frontend → Automation → filter `UnrealSplit`, run selected. Or in the
+   PIE console: `Automation RunTests UnrealSplit`.
+
+Either way, expect the world to travel during host/leave tests (listen reopen,
+then back to the entry map) — that is the flow under test, not a fault.
+
+Typing `Automation RunTests` into the **editor** console (no Play running) skips
+every test with `Skipped: no PIE/game world`: the editor world has no game
+instance, so there is no session subsystem to drive.
 
 ### Run headless
 

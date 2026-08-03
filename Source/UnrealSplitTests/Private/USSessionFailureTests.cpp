@@ -20,7 +20,7 @@
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUSSessionFailureJoinInvalidIndexTest,
 	"UnrealSplit.Session.Failure.JoinInvalidIndex",
-	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ClientContext | EAutomationTestFlags::ProductFilter)
 
 bool FUSSessionFailureJoinInvalidIndexTest::RunTest(const FString& Parameters)
 {
@@ -59,7 +59,7 @@ bool FUSSessionFailureJoinInvalidIndexTest::RunTest(const FString& Parameters)
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUSSessionFailureJoinStaleAfterNoSearchTest,
 	"UnrealSplit.Session.Failure.JoinStaleNoSearch",
-	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ClientContext | EAutomationTestFlags::ProductFilter)
 
 bool FUSSessionFailureJoinStaleAfterNoSearchTest::RunTest(const FString& Parameters)
 {
