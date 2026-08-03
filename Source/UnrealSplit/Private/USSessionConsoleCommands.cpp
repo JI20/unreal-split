@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 
+#include "Engine/Engine.h"
 #include "Engine/GameInstance.h"
 #include "Engine/LocalPlayer.h"
 #include "Engine/World.h"
@@ -302,6 +303,63 @@ static FAutoConsoleCommandWithWorldArgsAndOutputDevice GUSSessionStateCommand(
 				Index, *Found[Index].SessionId, *Found[Index].OwnerName, Found[Index].PingInMs,
 				Found[Index].OpenPublicConnections, Found[Index].MaxPublicConnections));
 		}
+	}));
+
+static FAutoConsoleCommandWithWorldArgsAndOutputDevice GUSNetProfileCommand(
+	TEXT("US.NetProfile"),
+	TEXT("UnrealSplit: apply or clear a named packet-simulation profile (opt-in). Usage: US.NetProfile [clean|good|average|poor|torture|off]. Does nothing until you run it — profiles in DefaultEngine.ini are never auto-applied. Compiles out of Shipping (DO_ENABLE_NET_TEST)."),
+	FConsoleCommandWithWorldArgsAndOutputDeviceDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World, FOutputDevice& Ar)
+	{
+		static const TCHAR* const ProfileNames[] = {
+			TEXT("clean"), TEXT("good"), TEXT("average"), TEXT("poor"), TEXT("torture")
+		};
+
+		if (World == nullptr)
+		{
+			ReportWarning(Ar, TEXT("US.NetProfile: no world."));
+			return;
+		}
+
+		if (Args.Num() == 0)
+		{
+			Report(Ar, TEXT("US.NetProfile: opt-in only. Usage: US.NetProfile <clean|good|average|poor|torture|off>. Nothing is applied at launch; 'off' clears emulation."));
+			return;
+		}
+
+		const FString& Arg = Args[0];
+		if (Arg.Equals(TEXT("off"), ESearchCase::IgnoreCase))
+		{
+			// Clears PersistentPacketSimulationSettings and pushes zeros onto
+			// active net drivers. Safe to call when nothing was applied.
+			GEngine->Exec(World, TEXT("NetEmulation.Off"), Ar);
+			Report(Ar, TEXT("US.NetProfile: network emulation off."));
+			return;
+		}
+
+		bool bKnown = false;
+		for (const TCHAR* Name : ProfileNames)
+		{
+			if (Arg.Equals(Name, ESearchCase::IgnoreCase))
+			{
+				bKnown = true;
+				break;
+			}
+		}
+
+		if (!bKnown)
+		{
+			ReportWarning(Ar, FString::Printf(
+				TEXT("US.NetProfile: unknown profile '%s'. Use clean, good, average, poor, torture, or off."), *Arg));
+			return;
+		}
+
+		// Engine loads [PacketSimulationProfile.<Name>] from GEngineIni and
+		// applies it. Missing section → engine logs and leaves settings unchanged.
+		const FString Cmd = FString::Printf(TEXT("NetEmulation.PktEmulationProfile %s"), *Arg);
+		GEngine->Exec(World, *Cmd, Ar);
+		Report(Ar, FString::Printf(
+			TEXT("US.NetProfile: applied '%s'. Affects remote NetConnections only (Null and EOS). Couch / standalone unchanged. US.NetProfile off to clear."),
+			*Arg));
 	}));
 
 #endif // !UE_BUILD_SHIPPING
