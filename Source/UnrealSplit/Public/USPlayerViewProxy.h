@@ -262,8 +262,14 @@ private:
 	 * A background process that wakes only a few times a second would otherwise
 	 * clamp each step and fall behind the sender timeline until the error
 	 * threshold fired — a sawtooth of growing lag. Any wake longer than this is
-	 * treated as a stall and resynced instead. Foreground 100 ms NetEmulation at
-	 * a normal frame rate never approaches it.
+	 * treated as a stall and resynced instead, which is also the better answer for
+	 * a genuinely slow receiver: it shows the newest framing one delay back rather
+	 * than falling further behind every frame.
+	 *
+	 * Not to be lowered much. Set below a frame time it would resync every frame,
+	 * which is arrival-keyed playback and brings back exactly the jitter the
+	 * sender-timeline design exists to avoid. At the default no playable frame rate
+	 * comes near it.
 	 */
 	UPROPERTY(Config)
 	float MaxPlaybackAdvanceSeconds = 0.25f;
