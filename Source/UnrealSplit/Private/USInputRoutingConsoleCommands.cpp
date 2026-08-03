@@ -8,6 +8,7 @@
 
 #include "USConsoleReport.h"
 #include "USInputRoutingSubsystem.h"
+#include "USShadowLocalPlayer.h"
 
 // Development-only driver for input routing until the game's device-selection
 // menu exists. The console is compiled out of shipping builds, so these go
@@ -30,7 +31,7 @@ static FAutoConsoleCommandWithWorldArgsAndOutputDevice GUSInputDevicesCommand(
 
 		const TArray<FUSInputDeviceInfo> Devices = InputRouting->GetInputDevices();
 		Report(Ar, FString::Printf(TEXT("US.InputDevices: %d connected device(s), %d local player(s)."),
-			Devices.Num(), World->GetGameInstance()->GetNumLocalPlayers()));
+			Devices.Num(), UUSShadowLocalPlayer::CountRealLocalPlayers(World->GetGameInstance())));
 
 		for (const FUSInputDeviceInfo& Device : Devices)
 		{

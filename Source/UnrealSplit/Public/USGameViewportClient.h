@@ -28,8 +28,9 @@ class ULocalPlayer;
  *
  * Nothing here branches on session mode, and nothing assumes a particular number
  * of local players: the layout is a function of how many players actually render
- * into this viewport. One (an online client, until the 1.6 shadow view lands) is
- * a full-screen layout, not a broken split.
+ * into this viewport. One — a machine whose partner's camera stream has not
+ * started delivering yet, or one with the remote view switched off — is a
+ * full-screen layout, not a broken split.
  */
 UCLASS()
 class UNREALSPLIT_API UUSGameViewportClient : public UGameViewportClient

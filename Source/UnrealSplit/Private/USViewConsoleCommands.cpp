@@ -4,6 +4,7 @@
 
 #include "Camera/CameraActor.h"
 #include "Engine/Engine.h"
+#include "Engine/GameInstance.h"
 #include "Engine/LocalPlayer.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
@@ -13,6 +14,8 @@
 #include "UObject/Class.h"
 
 #include "USConsoleReport.h"
+#include "USRemoteViewSubsystem.h"
+#include "USShadowLocalPlayer.h"
 #include "USViewState.h"
 #include "USViewSubsystem.h"
 
@@ -120,6 +123,14 @@ namespace
 		for (ULocalPlayer* const LocalPlayer : GEngine->GetGamePlayers(World))
 		{
 			if (LocalPlayer == nullptr || LocalPlayer->PlayerController == nullptr)
+			{
+				continue;
+			}
+
+			// A shadow view looks through its own controller at a replicated camera
+			// stream, so its "view target" is an implementation detail of this
+			// plugin and merging onto it would mean merging onto nothing.
+			if (UUSShadowLocalPlayer::IsShadow(LocalPlayer))
 			{
 				continue;
 			}
@@ -438,8 +449,52 @@ static FAutoConsoleCommandWithWorldArgsAndOutputDevice GUSViewStateCommand(
 				Replicated.bMerged ? TEXT("yes") : TEXT("no")));
 		}
 
-		Report(Ar, FString::Printf(TEXT("Local views: %d. One view is laid out full screen; the split needs two."),
-			GEngine->GetNumGamePlayers(World)));
+		const int32 RealPlayers = UUSShadowLocalPlayer::CountRealLocalPlayers(World->GetGameInstance());
+		Report(Ar, FString::Printf(TEXT("Local views: %d (%d played by someone here). One view is laid out full screen; the split needs two."),
+			GEngine->GetNumGamePlayers(World), RealPlayers));
+
+		if (const UUSRemoteViewSubsystem* const RemoteView = World->GetGameInstance()->GetSubsystem<UUSRemoteViewSubsystem>())
+		{
+			Report(Ar, FString::Printf(TEXT("Remote view: %s on this machine; shadow view %s"),
+				RemoteView->IsRemoteViewEnabled() ? TEXT("enabled") : TEXT("disabled (US.RemoteView on)"),
+				*RemoteView->DescribeShadowViewState()));
+		}
+	}));
+
+static FAutoConsoleCommandWithWorldArgsAndOutputDevice GUSRemoteViewCommand(
+	TEXT("US.RemoteView"),
+	TEXT("UnrealSplit: switch the second view — the one showing the remote partner's camera — on or off for this machine. Usage: US.RemoteView [on|off]; with no argument it reports the current state. Local only and unreplicated, so the other machine keeps whatever it was doing."),
+	FConsoleCommandWithWorldArgsAndOutputDeviceDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World, FOutputDevice& Ar)
+	{
+		UUSRemoteViewSubsystem* const RemoteView = USConsole::FindSubsystem<UUSRemoteViewSubsystem>(World, Ar);
+		if (RemoteView == nullptr)
+		{
+			return;
+		}
+
+		if (Args.Num() == 0)
+		{
+			Report(Ar, FString::Printf(TEXT("US.RemoteView: %s on this machine; shadow view %s"),
+				RemoteView->IsRemoteViewEnabled() ? TEXT("enabled") : TEXT("disabled"),
+				*RemoteView->DescribeShadowViewState()));
+			return;
+		}
+
+		const FString& Argument = Args[0];
+		const bool bWantsOn = Argument.Equals(TEXT("on"), ESearchCase::IgnoreCase) || Argument.Equals(TEXT("1"), ESearchCase::IgnoreCase) || Argument.Equals(TEXT("true"), ESearchCase::IgnoreCase);
+		const bool bWantsOff = Argument.Equals(TEXT("off"), ESearchCase::IgnoreCase) || Argument.Equals(TEXT("0"), ESearchCase::IgnoreCase) || Argument.Equals(TEXT("false"), ESearchCase::IgnoreCase);
+
+		if (!bWantsOn && !bWantsOff)
+		{
+			ReportWarning(Ar, FString::Printf(TEXT("US.RemoteView: '%s' is neither on nor off. Usage: US.RemoteView [on|off]."), *Argument));
+			return;
+		}
+
+		RemoteView->SetRemoteViewEnabled(bWantsOn);
+
+		Report(Ar, FString::Printf(TEXT("US.RemoteView: %s; shadow view %s"),
+			bWantsOn ? TEXT("enabled") : TEXT("disabled"),
+			*RemoteView->DescribeShadowViewState()));
 	}));
 
 #endif // !UE_BUILD_SHIPPING

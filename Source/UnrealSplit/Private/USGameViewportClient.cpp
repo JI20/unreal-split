@@ -9,6 +9,7 @@
 #include "GameFramework/PlayerController.h"
 
 #include "UnrealSplitModule.h"
+#include "USShadowLocalPlayer.h"
 
 namespace
 {
@@ -215,6 +216,16 @@ void UUSGameViewportClient::UpdateMergedViewTargets()
 			continue;
 		}
 
+		// A shadow view has no camera of its own to redirect: it shows whatever the
+		// partner's machine is looking at, and while merged its slot has no width
+		// and is not drawn at all. Pointing it at the merged target would achieve
+		// nothing visible and would leave a view target to restore afterwards that
+		// was never the partner's.
+		if (UUSShadowLocalPlayer::IsShadow(Player))
+		{
+			continue;
+		}
+
 		FUSMergedViewTargetRecord* Record = MergedViewTargetRecords.Find(PlayerController);
 
 		// Compared against what this class last asked for rather than against the
@@ -272,11 +283,11 @@ void UUSGameViewportClient::ComputeSlotRect(int32 SlotIndex, int32 NumSlots, flo
 		return;
 	}
 
-	// One slot is full screen, whatever the ratio says. This is the online case
-	// until the 1.6 shadow view gives a remote player's image a slot of its own:
-	// the intent still replicates, is still queryable, and starts dividing the
-	// screen the moment a second view exists to divide it between.
-	// A menu that force-disabled splitscreen collapses the same way.
+	// One slot is full screen, whatever the ratio says. That is a machine online
+	// whose partner's camera stream has not started delivering yet, or one with the
+	// remote view switched off: the intent still replicates, is still queryable,
+	// and starts dividing the screen the moment a second view exists to divide it
+	// between. A menu that force-disabled splitscreen collapses the same way.
 	if (NumSlots == 1 || IsSplitscreenForceDisabled())
 	{
 		if (SlotIndex == 0)
@@ -319,7 +330,10 @@ void UUSGameViewportClient::GatherSlots(TArray<ULocalPlayer*>& OutSlots) const
 
 	// Engine order is slot order, and it is the same order US.AddLocalPlayer and
 	// the input routing subsystem talk about, so "player 1" means one thing
-	// everywhere: slot 0.
+	// everywhere: slot 0. A shadow view is appended like any other local player
+	// and therefore lands in the last slot, which is what puts the remote partner
+	// on the right-hand side of the screen without a line of layout code knowing
+	// that it is remote.
 	for (ULocalPlayer* Player : GEngine->GetGamePlayers(this))
 	{
 		if (Player != nullptr && Player->GetViewportClient() == this)

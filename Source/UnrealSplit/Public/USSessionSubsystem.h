@@ -37,10 +37,13 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FUSOnBackendReady, bool, bReady);
  * number for both kinds: MaxTotalPlayers caps local and remote players together,
  * so which mix fills the game is a config decision, not a hard-coded one.
  *
- * Session mode is deliberately invisible to the view system — both modes render
- * two view slots — so this subsystem also owns setting up the shadow view that
- * gives an online client a view of the remote player. How that view is produced
- * is still open; it is selected by the comparison spike in plan step 1.6.
+ * Session mode is deliberately invisible to the view system: every machine renders
+ * two view slots, and online the second one is filled by UUSRemoteViewSubsystem
+ * from the partner's replicated camera. That subsystem is separate from this one
+ * because it answers a local rendering question, not a membership question; what
+ * this subsystem owes it is only that a shadow view never counts as a player, so
+ * every seat, capacity and registration decision here counts real local players
+ * (UUSShadowLocalPlayer::CountRealLocalPlayers) rather than views.
  *
  * Backend-agnostic by construction: everything goes through the generic
  * IOnlineSession interface of the process-default online subsystem, and no

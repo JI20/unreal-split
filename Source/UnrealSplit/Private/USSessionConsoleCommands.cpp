@@ -15,7 +15,9 @@
 #include "UObject/Class.h"
 
 #include "USConsoleReport.h"
+#include "USRemoteViewSubsystem.h"
 #include "USSessionSubsystem.h"
+#include "USShadowLocalPlayer.h"
 
 // Development-only driver for the session layer until real menu UI exists.
 // The console is compiled out of shipping builds, so these go with it.
@@ -123,7 +125,7 @@ static FAutoConsoleCommandWithWorldArgsAndOutputDevice GUSAddLocalPlayerCommand(
 		if (UUSSessionSubsystem* Sessions = USConsole::FindSubsystem<UUSSessionSubsystem>(World, Ar))
 		{
 			const bool bAdded = Sessions->AddLocalCoopPlayer();
-			const int32 NumLocalPlayers = World->GetGameInstance()->GetNumLocalPlayers();
+			const int32 NumLocalPlayers = UUSShadowLocalPlayer::CountRealLocalPlayers(World->GetGameInstance());
 
 			if (bAdded)
 			{
@@ -145,7 +147,7 @@ static FAutoConsoleCommandWithWorldArgsAndOutputDevice GUSRemoveLocalPlayerComma
 		if (UUSSessionSubsystem* Sessions = USConsole::FindSubsystem<UUSSessionSubsystem>(World, Ar))
 		{
 			const bool bRemoved = Sessions->RemoveLocalCoopPlayer();
-			const int32 NumLocalPlayers = World->GetGameInstance()->GetNumLocalPlayers();
+			const int32 NumLocalPlayers = UUSShadowLocalPlayer::CountRealLocalPlayers(World->GetGameInstance());
 
 			if (bRemoved)
 			{
@@ -251,7 +253,13 @@ static FAutoConsoleCommandWithWorldArgsAndOutputDevice GUSSessionStateCommand(
 		// identity can never be registered in the session, and that is invisible
 		// otherwise until registration silently skips it.
 		const IOnlineIdentityPtr Identity = Online::GetIdentityInterface(World);
-		const TArray<ULocalPlayer*>& LocalPlayers = World->GetGameInstance()->GetLocalPlayers();
+
+		// People, not views. A shadow view rendering the remote partner is a local
+		// player as far as the renderer is concerned and nothing at all as far as
+		// the session is concerned, so listing it here would invite exactly the
+		// wrong conclusion about who is registered and who holds a seat.
+		TArray<ULocalPlayer*> LocalPlayers;
+		UUSShadowLocalPlayer::GetRealLocalPlayers(World->GetGameInstance(), LocalPlayers);
 		Report(Ar, FString::Printf(TEXT("  %d local player(s) on this machine:"), LocalPlayers.Num()));
 
 		for (int32 Index = 0; Index < LocalPlayers.Num(); ++Index)
@@ -273,6 +281,16 @@ static FAutoConsoleCommandWithWorldArgsAndOutputDevice GUSSessionStateCommand(
 				UserIndex,
 				ELoginStatus::ToString(LoginStatus),
 				PlayerId.IsValid() ? *PlayerId.ToDebugString() : TEXT("invalid")));
+		}
+
+		// Named but not listed as a player, so a second view on screen is never a
+		// mystery here while still not counting as somebody in the session.
+		if (const UUSRemoteViewSubsystem* RemoteView = World->GetGameInstance()->GetSubsystem<UUSRemoteViewSubsystem>())
+		{
+			if (RemoteView->IsShadowViewActive())
+			{
+				Report(Ar, TEXT("    plus a shadow view drawing the remote partner, which is not a player here — see US.ViewState."));
+			}
 		}
 
 		const TArray<FUSSessionSearchResultInfo> Found = Sessions->GetFoundSessions();

@@ -24,6 +24,7 @@
 #include "UObject/Class.h"
 
 #include "USConsoleReport.h"
+#include "USShadowLocalPlayer.h"
 #include "UnrealSplitModule.h"
 #include "UnrealSplitStartupModule.h"
 
@@ -643,9 +644,10 @@ void UUSSessionSubsystem::JoinFoundSession(int32 SearchResultIndex)
 	// with more players than the host has free seats cannot join at all. Checked
 	// here because the host would otherwise accept the first player and refuse the
 	// rest mid-travel, which drops the whole connection.
-	// Counts local players, not game players: if the shadow view of plan step 1.6
-	// ends up being a controller-less ULocalPlayer, it has to be excluded here.
-	const int32 NumLocalPlayers = GetGameInstance()->GetNumLocalPlayers();
+	// Counts people at this machine rather than views on its screen: a shadow view
+	// travels with nobody and asks for no seat, so counting it here would refuse
+	// joins that fit.
+	const int32 NumLocalPlayers = UUSShadowLocalPlayer::CountRealLocalPlayers(GetGameInstance());
 	const int32 OpenSeats = FoundSessions[SearchResultIndex].OpenPublicConnections;
 	if (NumLocalPlayers > OpenSeats)
 	{
@@ -774,7 +776,7 @@ void UUSSessionSubsystem::LeaveSession()
 bool UUSSessionSubsystem::AddLocalCoopPlayer()
 {
 	UGameInstance* GameInstance = GetGameInstance();
-	const int32 NumLocalPlayers = GameInstance->GetNumLocalPlayers();
+	const int32 NumLocalPlayers = UUSShadowLocalPlayer::CountRealLocalPlayers(GameInstance);
 
 	// Counts remote players too: a client whose host already fills the game gets
 	// no second seat here, and the engine would refuse the split join anyway.
@@ -852,13 +854,13 @@ bool UUSSessionSubsystem::AddLocalCoopPlayer()
 	}
 
 	// Synchronous backends (Null/LAN) already ran the completion above.
-	return GameInstance->GetNumLocalPlayers() > NumLocalPlayers;
+	return UUSShadowLocalPlayer::CountRealLocalPlayers(GameInstance) > NumLocalPlayers;
 }
 
 bool UUSSessionSubsystem::CreateLocalCoopPlayerForUser(FPlatformUserId UserId)
 {
 	UGameInstance* GameInstance = GetGameInstance();
-	const int32 NumLocalPlayers = GameInstance->GetNumLocalPlayers();
+	const int32 NumLocalPlayers = UUSShadowLocalPlayer::CountRealLocalPlayers(GameInstance);
 
 	// Re-checked because an asynchronous login resolves long after the request,
 	// and a remote player may have joined in the meantime.
@@ -880,7 +882,7 @@ bool UUSSessionSubsystem::CreateLocalCoopPlayerForUser(FPlatformUserId UserId)
 	TArray<FInputDeviceId> PairedDevices;
 	IPlatformInputDeviceMapper::Get().GetAllInputDevicesForUser(UserId, PairedDevices);
 	UE_LOG(LogUnrealSplit, Log, TEXT("Local co-op player added: now %d local player(s), PlatformUser=%d with %d paired input device(s)."),
-		GameInstance->GetNumLocalPlayers(), UserId.GetInternalId(), PairedDevices.Num());
+		UUSShadowLocalPlayer::CountRealLocalPlayers(GameInstance), UserId.GetInternalId(), PairedDevices.Num());
 
 	// A backend that derives ids from the machine alone gives every local user the
 	// same one, and the session then counts two couch players as one. Config fixes
@@ -891,6 +893,11 @@ bool UUSSessionSubsystem::CreateLocalCoopPlayerForUser(FPlatformUserId UserId)
 	{
 		for (const ULocalPlayer* ExistingPlayer : GameInstance->GetLocalPlayers())
 		{
+			if (UUSShadowLocalPlayer::IsShadow(ExistingPlayer))
+			{
+				continue;
+			}
+
 			if (ExistingPlayer != nullptr && ExistingPlayer != NewPlayer && ExistingPlayer->GetPreferredUniqueNetId() == NewPlayerId)
 			{
 				UE_LOG(LogUnrealSplit, Warning, TEXT("Local players share the online id '%s', so the session counts them as one player. Give each local user its own identity in the active backend's config."), *NewPlayerId.ToDebugString());
@@ -939,7 +946,7 @@ int32 UUSSessionSubsystem::GetKnownPlayerCount() const
 		return GameState->PlayerArray.Num();
 	}
 
-	return GameInstance->GetNumLocalPlayers();
+	return UUSShadowLocalPlayer::CountRealLocalPlayers(GameInstance);
 }
 
 void UUSSessionSubsystem::OnLocalCoopPlayerLoginFinished(int32 LocalUserIndex, bool bWasSuccessful, const FString& ErrorString)
@@ -969,7 +976,7 @@ void UUSSessionSubsystem::OnLocalCoopPlayerLoginFinished(int32 LocalUserIndex, b
 bool UUSSessionSubsystem::RemoveLocalCoopPlayer()
 {
 	UGameInstance* GameInstance = GetGameInstance();
-	const int32 NumLocalPlayers = GameInstance->GetNumLocalPlayers();
+	const int32 NumLocalPlayers = UUSShadowLocalPlayer::CountRealLocalPlayers(GameInstance);
 
 	if (NumLocalPlayers <= 1)
 	{
@@ -986,7 +993,17 @@ bool UUSSessionSubsystem::RemoveLocalCoopPlayer()
 		return false;
 	}
 
-	ULocalPlayer* PlayerToRemove = GameInstance->GetLocalPlayerByIndex(NumLocalPlayers - 1);
+	// The last real player, not the last local player: a shadow view is appended
+	// after the couch players, so removing by raw index would remove the partner's
+	// window and leave the couch player it was meant to remove sitting there.
+	ULocalPlayer* PlayerToRemove = UUSShadowLocalPlayer::GetRealLocalPlayerByIndex(GameInstance, NumLocalPlayers - 1);
+
+	if (PlayerToRemove == nullptr)
+	{
+		UE_LOG(LogUnrealSplit, Error, TEXT("RemoveLocalCoopPlayer failed: local player %d could not be found."), NumLocalPlayers - 1);
+		return false;
+	}
+
 	const FPlatformUserId UserId = PlayerToRemove->GetPlatformUserId();
 
 	// Removal destroys the player controller, which runs the regular logout
@@ -998,7 +1015,7 @@ bool UUSSessionSubsystem::RemoveLocalCoopPlayer()
 	}
 
 	UE_LOG(LogUnrealSplit, Log, TEXT("Local co-op player removed: PlatformUser=%d released, %d local player(s) remain."),
-		UserId.GetInternalId(), GameInstance->GetNumLocalPlayers());
+		UserId.GetInternalId(), UUSShadowLocalPlayer::CountRealLocalPlayers(GameInstance));
 
 	return true;
 }
@@ -1189,12 +1206,16 @@ void UUSSessionSubsystem::HandleGameModePostLogin(AGameModeBase* GameMode, APlay
 void UUSSessionSubsystem::RegisterLocalPlayersWithSession(const FString& Context)
 {
 	const UGameInstance* GameInstance = GetGameInstance();
-	for (const ULocalPlayer* LocalPlayer : GameInstance->GetLocalPlayers())
+
+	// Real players only. A shadow view is a second scene view, not a second
+	// participant: registering it would put an id the backend has never heard of
+	// into the session and spend one of its seats on a camera.
+	TArray<ULocalPlayer*> RealPlayers;
+	UUSShadowLocalPlayer::GetRealLocalPlayers(GameInstance, RealPlayers);
+
+	for (const ULocalPlayer* LocalPlayer : RealPlayers)
 	{
-		if (LocalPlayer != nullptr)
-		{
-			TryRegisterPlayerInSession(LocalPlayer->GetPreferredUniqueNetId(), Context);
-		}
+		TryRegisterPlayerInSession(LocalPlayer->GetPreferredUniqueNetId(), Context);
 	}
 }
 

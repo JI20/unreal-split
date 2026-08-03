@@ -3,6 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Engine/NetSerialization.h"
 #include "USViewTypes.generated.h"
 
 class AActor;
@@ -83,4 +84,90 @@ struct FUSViewIntent
 	/** Curve the blend follows. */
 	UPROPERTY(BlueprintReadOnly, Category = "UnrealSplit|View")
 	EUSViewEasing Easing = EUSViewEasing::EaseInOut;
+};
+
+/**
+ * One machine's camera at one instant — the whole of what the other machine
+ * needs to draw that player's view.
+ *
+ * The finished camera rather than the inputs to it: the sending machine has
+ * already run the game's own camera, spring arm collision included, against the
+ * only world where that player's position is authoritative. Sending control
+ * rotation instead would mean re-deriving the camera on the receiver against an
+ * interpolated proxy pawn, and every hitch in that interpolation would show up
+ * as camera jitter rather than as the small positional error it actually is.
+ *
+ * Quantised because none of the precision that is thrown away is visible: 0.1 uu
+ * of position, a fifth of an arcminute of angle, a whole degree of field of view.
+ * That leaves roughly twenty bytes, which is what makes a 30 Hz stream cheap.
+ */
+USTRUCT(BlueprintType)
+struct FUSViewSample
+{
+	GENERATED_BODY()
+
+	/** Camera position, quantised to 0.1 uu. */
+	UPROPERTY(BlueprintReadOnly, Category = "UnrealSplit|View")
+	FVector_NetQuantize10 Location = FVector::ZeroVector;
+
+	/** Camera orientation, one unsigned short per axis; roll included, so camera shake survives. */
+	UPROPERTY()
+	uint16 CompressedPitch = 0;
+
+	UPROPERTY()
+	uint16 CompressedYaw = 0;
+
+	UPROPERTY()
+	uint16 CompressedRoll = 0;
+
+	/** Horizontal field of view in whole degrees. */
+	UPROPERTY(BlueprintReadOnly, Category = "UnrealSplit|View")
+	uint8 FieldOfViewDegrees = 90;
+
+	/**
+	 * When the sending machine took this sample, in milliseconds since that
+	 * machine's own stream started. Never compared against the receiver's clock,
+	 * only against other samples from the same sender.
+	 *
+	 * This is what keeps the network out of the picture. Playing the stream back
+	 * against the moments samples *arrived* would make the camera's apparent speed
+	 * follow the jitter of the connection: two samples delivered 5 ms apart carry
+	 * a whole send interval of real movement, so the view lurches and then crawls.
+	 * Spacing them by the moments they were *taken* gives back the sender's own
+	 * cadence exactly, and jitter is absorbed by the playback delay instead of
+	 * being drawn.
+	 *
+	 * Four bytes rather than a delta from the previous sample, because most
+	 * samples never arrive: a replicated property only ever carries its newest
+	 * value, so a receiver that added up deltas would compress its timeline every
+	 * time an update was skipped.
+	 */
+	UPROPERTY()
+	uint32 SendTimeMs = 0;
+
+	/**
+	 * Bumped by the sender every time the camera jumped instead of moving.
+	 *
+	 * Nothing in the numbers distinguishes a cut from very fast motion, and
+	 * interpolating across a cut sweeps the view through the level between the
+	 * two framings. This tells the receiver to throw its history away and land on
+	 * the new framing at once.
+	 */
+	UPROPERTY()
+	uint8 CutCounter = 0;
+
+	FRotator GetRotation() const
+	{
+		return FRotator(
+			FRotator::DecompressAxisFromShort(CompressedPitch),
+			FRotator::DecompressAxisFromShort(CompressedYaw),
+			FRotator::DecompressAxisFromShort(CompressedRoll));
+	}
+
+	void SetRotation(const FRotator& Rotation)
+	{
+		CompressedPitch = FRotator::CompressAxisToShort(Rotation.Pitch);
+		CompressedYaw = FRotator::CompressAxisToShort(Rotation.Yaw);
+		CompressedRoll = FRotator::CompressAxisToShort(Rotation.Roll);
+	}
 };

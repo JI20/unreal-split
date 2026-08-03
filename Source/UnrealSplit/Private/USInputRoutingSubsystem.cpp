@@ -10,6 +10,7 @@
 #include "GenericPlatform/GenericPlatformInputDeviceMapper.h"
 
 #include "UnrealSplitModule.h"
+#include "USShadowLocalPlayer.h"
 
 void UUSInputRoutingSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
@@ -53,7 +54,7 @@ TArray<FUSInputDeviceInfo> UUSInputRoutingSubsystem::GetInputDevices() const
 TArray<FUSInputDeviceInfo> UUSInputRoutingSubsystem::GetInputDevicesForPlayer(int32 PlayerIndex) const
 {
 	const UGameInstance* GameInstance = GetGameInstance();
-	const ULocalPlayer* Player = GameInstance != nullptr ? GameInstance->GetLocalPlayerByIndex(PlayerIndex) : nullptr;
+	const ULocalPlayer* Player = UUSShadowLocalPlayer::GetRealLocalPlayerByIndex(GameInstance, PlayerIndex);
 
 	TArray<FUSInputDeviceInfo> Infos;
 	if (Player == nullptr)
@@ -77,11 +78,15 @@ TArray<FUSInputDeviceInfo> UUSInputRoutingSubsystem::GetInputDevicesForPlayer(in
 bool UUSInputRoutingSubsystem::AssignInputDeviceToPlayer(int32 DeviceId, int32 PlayerIndex)
 {
 	const UGameInstance* GameInstance = GetGameInstance();
-	const ULocalPlayer* TargetPlayer = GameInstance != nullptr ? GameInstance->GetLocalPlayerByIndex(PlayerIndex) : nullptr;
+
+	// Player indices here count people, not views: a shadow view rendering the
+	// remote partner is not addressable by any of these calls, which is what makes
+	// it impossible to hand a device to the one player that must never have one.
+	const ULocalPlayer* TargetPlayer = UUSShadowLocalPlayer::GetRealLocalPlayerByIndex(GameInstance, PlayerIndex);
 	if (TargetPlayer == nullptr)
 	{
 		UE_LOG(LogUnrealSplit, Warning, TEXT("AssignInputDeviceToPlayer rejected: no local player %d on this machine (%d present). Add the player first."),
-			PlayerIndex, GameInstance != nullptr ? GameInstance->GetNumLocalPlayers() : 0);
+			PlayerIndex, UUSShadowLocalPlayer::CountRealLocalPlayers(GameInstance));
 		return false;
 	}
 
@@ -128,7 +133,7 @@ bool UUSInputRoutingSubsystem::AssignInputDeviceToPlayer(int32 DeviceId, int32 P
 		Mapper.GetAllConnectedInputDevicesForUser(OldUserId, RemainingDevices);
 		if (RemainingDevices.IsEmpty())
 		{
-			UE_LOG(LogUnrealSplit, Warning, TEXT("Local player %d has no input device left after the move."), GameInstance->GetLocalPlayers().IndexOfByKey(PreviousPlayer));
+			UE_LOG(LogUnrealSplit, Warning, TEXT("Local player %d has no input device left after the move."), UUSShadowLocalPlayer::GetRealLocalPlayerIndex(GameInstance, PreviousPlayer));
 		}
 	}
 
@@ -138,12 +143,12 @@ bool UUSInputRoutingSubsystem::AssignInputDeviceToPlayer(int32 DeviceId, int32 P
 bool UUSInputRoutingSubsystem::SwapPlayerInputDevices(int32 FirstPlayerIndex, int32 SecondPlayerIndex)
 {
 	const UGameInstance* GameInstance = GetGameInstance();
-	const ULocalPlayer* FirstPlayer = GameInstance != nullptr ? GameInstance->GetLocalPlayerByIndex(FirstPlayerIndex) : nullptr;
-	const ULocalPlayer* SecondPlayer = GameInstance != nullptr ? GameInstance->GetLocalPlayerByIndex(SecondPlayerIndex) : nullptr;
+	const ULocalPlayer* FirstPlayer = UUSShadowLocalPlayer::GetRealLocalPlayerByIndex(GameInstance, FirstPlayerIndex);
+	const ULocalPlayer* SecondPlayer = UUSShadowLocalPlayer::GetRealLocalPlayerByIndex(GameInstance, SecondPlayerIndex);
 	if (FirstPlayer == nullptr || SecondPlayer == nullptr || FirstPlayer == SecondPlayer)
 	{
 		UE_LOG(LogUnrealSplit, Warning, TEXT("SwapPlayerInputDevices rejected: local players %d and %d are not two different players on this machine (%d present)."),
-			FirstPlayerIndex, SecondPlayerIndex, GameInstance != nullptr ? GameInstance->GetNumLocalPlayers() : 0);
+			FirstPlayerIndex, SecondPlayerIndex, UUSShadowLocalPlayer::CountRealLocalPlayers(GameInstance));
 		return false;
 	}
 
@@ -205,7 +210,7 @@ FUSInputDeviceInfo UUSInputRoutingSubsystem::DescribeDevice(FInputDeviceId Devic
 
 	if (const ULocalPlayer* Player = FindPlayerForPlatformUser(UserId))
 	{
-		Info.PlayerIndex = GetGameInstance()->GetLocalPlayers().IndexOfByKey(Player);
+		Info.PlayerIndex = UUSShadowLocalPlayer::GetRealLocalPlayerIndex(GetGameInstance(), Player);
 	}
 
 	// The hardware name is published asynchronously by the platform, so a device
@@ -230,9 +235,14 @@ const ULocalPlayer* UUSInputRoutingSubsystem::FindPlayerForPlatformUser(FPlatfor
 		return nullptr;
 	}
 
+	// Shadow views are skipped rather than matched. The engine's own device routing
+	// matches local players by platform user, which is why a shadow view is given
+	// an id above the splitscreen cap that no device answers to — and why this,
+	// the plugin's equivalent lookup, must not hand a device's owner back as a
+	// player either.
 	for (const ULocalPlayer* Player : GameInstance->GetLocalPlayers())
 	{
-		if (Player != nullptr && Player->GetPlatformUserId() == UserId)
+		if (Player != nullptr && !UUSShadowLocalPlayer::IsShadow(Player) && Player->GetPlatformUserId() == UserId)
 		{
 			return Player;
 		}
