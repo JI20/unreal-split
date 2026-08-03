@@ -57,73 +57,38 @@ namespace USSessionTest
 
 	UUSSessionSubsystem* ResolveSubsystem(FAutomationTestBase& Test, FContextPtr Context)
 	{
-		if (GEngine != nullptr)
+		if (GEngine == nullptr)
 		{
-			for (const FWorldContext& WorldContext : GEngine->GetWorldContexts())
-			{
-				UWorld* const World = WorldContext.World();
-				if (World == nullptr || World->GetGameInstance() == nullptr)
-				{
-					continue;
-				}
-				if (WorldContext.WorldType == EWorldType::Editor)
-				{
-					continue;
-				}
-				if (UUSSessionSubsystem* Sessions = World->GetGameInstance()->GetSubsystem<UUSSessionSubsystem>())
-				{
-					if (Context.IsValid())
-					{
-						Context->Sessions = Sessions;
-						Context->Test = &Test;
-					}
-					return Sessions;
-				}
-			}
-
-			for (const FWorldContext& WorldContext : GEngine->GetWorldContexts())
-			{
-				UWorld* const World = WorldContext.World();
-				UGameInstance* const GameInstance = World != nullptr ? World->GetGameInstance() : nullptr;
-				if (UUSSessionSubsystem* Sessions = GameInstance != nullptr ? GameInstance->GetSubsystem<UUSSessionSubsystem>() : nullptr)
-				{
-					if (Context.IsValid())
-					{
-						Context->Sessions = Sessions;
-						Context->Test = &Test;
-					}
-					return Sessions;
-				}
-			}
-		}
-
-		// Headless / no PIE: own a standalone game instance for the duration of the latent chain.
-		UGameInstance* const Standalone = NewObject<UGameInstance>(GetTransientPackage());
-		if (Standalone == nullptr)
-		{
-			Test.AddError(TEXT("Could not allocate a standalone UGameInstance for session tests."));
 			return nullptr;
 		}
 
-		Standalone->InitializeStandalone();
-		if (Context.IsValid())
+		for (const FWorldContext& WorldContext : GEngine->GetWorldContexts())
 		{
-			Context->OwnedGameInstance.Reset(Standalone);
+			if (WorldContext.WorldType != EWorldType::PIE && WorldContext.WorldType != EWorldType::Game)
+			{
+				continue;
+			}
+
+			UWorld* const World = WorldContext.World();
+			UGameInstance* const GameInstance = World != nullptr ? World->GetGameInstance() : nullptr;
+			if (GameInstance == nullptr)
+			{
+				continue;
+			}
+
+			if (UUSSessionSubsystem* Sessions = GameInstance->GetSubsystem<UUSSessionSubsystem>())
+			{
+				if (Context.IsValid())
+				{
+					Context->Sessions = Sessions;
+					Context->Test = &Test;
+				}
+				return Sessions;
+			}
 		}
 
-		UUSSessionSubsystem* const Sessions = Standalone->GetSubsystem<UUSSessionSubsystem>();
-		if (Sessions == nullptr)
-		{
-			Test.AddError(TEXT("Standalone GameInstance has no UUSSessionSubsystem. Is UnrealSplit loaded?"));
-			return nullptr;
-		}
-
-		if (Context.IsValid())
-		{
-			Context->Sessions = Sessions;
-			Context->Test = &Test;
-		}
-		return Sessions;
+		Test.AddWarning(TEXT("Skipped: no PIE/game world. Start Play In Editor, then run UnrealSplit.Session tests."));
+		return nullptr;
 	}
 
 	IOnlineSessionPtr GetOssSessions(const UUSSessionSubsystem* Subsystem)

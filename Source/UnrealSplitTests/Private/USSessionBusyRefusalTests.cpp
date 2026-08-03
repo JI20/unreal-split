@@ -30,7 +30,7 @@ bool FUSSessionBusyLeaveWhileIdleTest::RunTest(const FString& Parameters)
 	UUSSessionSubsystem* const Sessions = ResolveSubsystem(*this, Context);
 	if (Sessions == nullptr)
 	{
-		return false;
+		return true;
 	}
 
 	if (Sessions->GetSessionState() != EUSSessionState::Idle || HasNamedGameSession(Sessions))
@@ -78,7 +78,7 @@ bool FUSSessionBusyHostWhileHostingTest::RunTest(const FString& Parameters)
 	UUSSessionSubsystem* const Sessions = ResolveSubsystem(*this, Context);
 	if (Sessions == nullptr)
 	{
-		return false;
+		return true;
 	}
 
 	if (Sessions->GetSessionState() != EUSSessionState::Idle || HasNamedGameSession(Sessions))
@@ -147,7 +147,7 @@ bool FUSSessionBusyJoinWhileHostingTest::RunTest(const FString& Parameters)
 	UUSSessionSubsystem* const Sessions = ResolveSubsystem(*this, Context);
 	if (Sessions == nullptr)
 	{
-		return false;
+		return true;
 	}
 
 	if (Sessions->GetSessionState() != EUSSessionState::Idle || HasNamedGameSession(Sessions))
@@ -211,7 +211,7 @@ bool FUSSessionBusyHostReentrancyNeverTwoSessionsTest::RunTest(const FString& Pa
 	UUSSessionSubsystem* const Sessions = ResolveSubsystem(*this, Context);
 	if (Sessions == nullptr)
 	{
-		return false;
+		return true;
 	}
 
 	if (Sessions->GetSessionState() != EUSSessionState::Idle || HasNamedGameSession(Sessions))

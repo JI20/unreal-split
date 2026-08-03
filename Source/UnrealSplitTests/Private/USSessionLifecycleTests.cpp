@@ -27,7 +27,7 @@ bool FUSSessionLifecycleHostSucceedsTest::RunTest(const FString& Parameters)
 	UUSSessionSubsystem* const Sessions = ResolveSubsystem(*this, Context);
 	if (Sessions == nullptr)
 	{
-		return false;
+		return true;
 	}
 
 	if (Sessions->GetSessionState() != EUSSessionState::Idle || HasNamedGameSession(Sessions))
@@ -60,7 +60,7 @@ bool FUSSessionLifecycleHostLeaveIdleTest::RunTest(const FString& Parameters)
 	UUSSessionSubsystem* const Sessions = ResolveSubsystem(*this, Context);
 	if (Sessions == nullptr)
 	{
-		return false;
+		return true;
 	}
 
 	if (Sessions->GetSessionState() != EUSSessionState::Idle || HasNamedGameSession(Sessions))
@@ -93,7 +93,7 @@ bool FUSSessionLifecycleHostLeaveHostAgainTest::RunTest(const FString& Parameter
 	UUSSessionSubsystem* const Sessions = ResolveSubsystem(*this, Context);
 	if (Sessions == nullptr)
 	{
-		return false;
+		return true;
 	}
 
 	if (Sessions->GetSessionState() != EUSSessionState::Idle || HasNamedGameSession(Sessions))

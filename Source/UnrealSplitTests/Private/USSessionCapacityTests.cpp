@@ -28,7 +28,7 @@ bool FUSSessionCapacityTwoLocalsRefuseThirdTest::RunTest(const FString& Paramete
 	UUSSessionSubsystem* const Sessions = ResolveSubsystem(*this, Context);
 	if (Sessions == nullptr)
 	{
-		return false;
+		return true;
 	}
 
 	if (!EnsureSingleLocalPlayer(*this, Sessions))
@@ -71,7 +71,7 @@ bool FUSSessionCapacitySlotRecyclingTest::RunTest(const FString& Parameters)
 	UUSSessionSubsystem* const Sessions = ResolveSubsystem(*this, Context);
 	if (Sessions == nullptr)
 	{
-		return false;
+		return true;
 	}
 
 	if (!EnsureSingleLocalPlayer(*this, Sessions))
@@ -110,7 +110,7 @@ bool FUSSessionCapacityHostClampDegenerateTest::RunTest(const FString& Parameter
 	UUSSessionSubsystem* const Sessions = ResolveSubsystem(*this, Context);
 	if (Sessions == nullptr)
 	{
-		return false;
+		return true;
 	}
 
 	if (Sessions->GetSessionState() != EUSSessionState::Idle || HasNamedGameSession(Sessions))

@@ -32,7 +32,7 @@ bool FUSSessionRegistrationPrimaryRemovalRefusedTest::RunTest(const FString& Par
 	UUSSessionSubsystem* const Sessions = ResolveSubsystem(*this, Context);
 	if (Sessions == nullptr)
 	{
-		return false;
+		return true;
 	}
 
 	if (!EnsureSingleLocalPlayer(*this, Sessions))
@@ -59,7 +59,7 @@ bool FUSSessionRegistrationSecondaryRemovalTest::RunTest(const FString& Paramete
 	UUSSessionSubsystem* const Sessions = ResolveSubsystem(*this, Context);
 	if (Sessions == nullptr)
 	{
-		return false;
+		return true;
 	}
 
 	if (!EnsureSingleLocalPlayer(*this, Sessions))
@@ -94,7 +94,7 @@ bool FUSSessionRegistrationDoubleUnregisterHarmlessTest::RunTest(const FString& 
 	UUSSessionSubsystem* const Sessions = ResolveSubsystem(*this, Context);
 	if (Sessions == nullptr)
 	{
-		return false;
+		return true;
 	}
 
 	if (!EnsureSingleLocalPlayer(*this, Sessions))
@@ -129,7 +129,7 @@ bool FUSSessionRegistrationDoubleRegisterNoDuplicateTest::RunTest(const FString&
 	UUSSessionSubsystem* const Sessions = ResolveSubsystem(*this, Context);
 	if (Sessions == nullptr)
 	{
-		return false;
+		return true;
 	}
 
 	if (!EnsureSingleLocalPlayer(*this, Sessions))
@@ -207,7 +207,7 @@ bool FUSSessionRegistrationUnregisterNeverRegisteredTest::RunTest(const FString&
 	UUSSessionSubsystem* const Sessions = ResolveSubsystem(*this, Context);
 	if (Sessions == nullptr)
 	{
-		return false;
+		return true;
 	}
 
 	if (!EnsureSingleLocalPlayer(*this, Sessions))

@@ -9,7 +9,6 @@
 
 class UUSSessionSubsystem;
 class UUSSessionTestListener;
-class UGameInstance;
 
 /**
  * Shared helpers for UnrealSplit.Session.* automation (Null OSS, single process).
@@ -34,7 +33,6 @@ namespace USSessionTest
 		FAutomationTestBase* Test = nullptr;
 		double DeadlineSeconds = 0.0;
 		TStrongObjectPtr<UUSSessionTestListener> Listener;
-		TStrongObjectPtr<UGameInstance> OwnedGameInstance;
 
 		void ClearDelegates();
 		~FContext() { ClearDelegates(); }
@@ -48,7 +46,11 @@ namespace USSessionTest
 
 	using FContextPtr = TSharedPtr<FContext, ESPMode::ThreadSafe>;
 
-	/** Prefer an existing game/PIE world; otherwise spin up InitializeStandalone. */
+	/**
+	 * Subsystem of a live PIE/game world. Never creates a world or game instance:
+	 * session flows travel (listen server), which only a real game world survives.
+	 * Returns nullptr with a warning when nothing is running — callers skip then.
+	 */
 	UUSSessionSubsystem* ResolveSubsystem(FAutomationTestBase& Test, FContextPtr Context);
 
 	IOnlineSessionPtr GetOssSessions(const UUSSessionSubsystem* Subsystem);

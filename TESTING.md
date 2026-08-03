@@ -64,28 +64,34 @@ Developer module `UnrealSplitTests`. Single process, **Null OSS only**. Never
 enables packet simulation. Filter prefix: `UnrealSplit` (covers
 `UnrealSplit.Session.*`).
 
+**These tests need a running game world.** They drive the real session flow, and
+hosting reopens the current map as a listen server — that only works in a game
+world, so the tests never fabricate one. With no PIE running, every test logs
+`Skipped: no PIE/game world` and passes without touching anything.
+
 ### Run in editor
 
-Session Frontend → Automation → filter `UnrealSplit`, or console:
+1. Press Play (PIE), leave it running.
+2. Session Frontend → Automation → filter `UnrealSplit`, run selected. Or in the
+   console:
 
 ```
 Automation RunTests UnrealSplit
 ```
 
+Expect PIE to travel during host/leave tests (listen reopen, then back to the
+entry map) — that is the flow under test, not a fault.
+
 ### Run headless
 
-```
-UnrealEditor-Cmd.exe "<path-to>/wavelengths.uproject" -ExecCmds="Automation RunTests UnrealSplit; Quit" -unattended -nopause -nullrhi -log
-```
-
-Optional HTML/JSON report directory:
+Needs a game world too, so run the game target (not `-ExecCmds` on a bare
+editor, which would skip everything):
 
 ```
-UnrealEditor-Cmd.exe "<path-to>/wavelengths.uproject" -ExecCmds="Automation RunTests UnrealSplit; Quit" -unattended -nopause -nullrhi -log -ReportExportPath="D:/temp/us-automation"
+wavelengths.exe /Game/ThirdPersonTemplate/ThirdPerson/Lvl_ThirdPerson -ConnectionMode=Null -ExecCmds="Automation RunTests UnrealSplit; Quit" -unattended -nopause -log -ReportExportPath="D:/temp/us-automation"
 ```
 
-Use `-ConnectionMode=Null` (or the project default) so the editor process is on
-Null; EOS login is not required for this suite.
+EOS login is not required for this suite; Null is enough.
 
 ### Groups covered
 
