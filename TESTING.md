@@ -11,13 +11,15 @@ Packet simulation is **opt-in only** — nothing in this plugin or the game's
   `DO_ENABLE_NET_TEST`).
 - For EOS: Developer Authentication Tool running on `localhost:6300` with
   `dev1` / `dev2` (or your chosen passwords).
-- Pair launchers (optional): `Scripts/run-lan-pair.ps1`,
-  `Scripts/run-eos-pair.ps1` in the game repo. **Do not** pass `-NetProfile`
-  unless you intend to inject conditions.
+- Launchers (optional), in the game repo: `Scripts/run-local.ps1` (one window,
+  Null — couch, layout, audio, automation), `Scripts/run-lan-pair.ps1`,
+  `Scripts/run-eos-pair.ps1`. **Do not** pass `-NetProfile` unless you intend to
+  inject conditions.
 
 ## 1. Couch (local splitscreen)
 
-- [ ] One process, no session. `US.AddLocalPlayer` → two real locals.
+- [ ] One process, no session (`.\Scripts\run-local.ps1`, or Standalone Game).
+      `US.AddLocalPlayer` → two real locals.
 - [ ] Views split; `US.ViewState` shows no shadow view.
 - [ ] `US.NetProfile good` then move around — framing should feel unchanged
       (no remote `NetConnection`). Then `US.NetProfile off`.
@@ -107,11 +109,16 @@ Tests must run in the **same process** as the game world. Two ways:
 
 ### A. Standalone game (preferred)
 
-Play dropdown → **Standalone Game**. In the game window press `` ` `` and run:
+Play dropdown → **Standalone Game**, or `.\Scripts\run-local.ps1` without the
+editor open at all. In the game window press `` ` `` and run:
 
 ```
 Automation RunTests UnrealSplit
 ```
+
+`.\Scripts\run-local.ps1 -Tests` does the same through `-ExecCmds` and leaves the
+window up so you can read the results. It refuses to combine with `-NetProfile`,
+since the suite must never run against injected conditions.
 
 The editor stays out of it entirely; travel happens in the throwaway process.
 
