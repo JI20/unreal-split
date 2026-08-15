@@ -170,6 +170,11 @@ void UUSRemoteViewSubsystem::NotifyRemoteStreamLost(AUSPlayerViewProxy* Proxy)
 	}
 
 	EvaluateShadowView();
+
+	// A side just became free, which is a change a picker has to redraw even though
+	// nobody moved: the slot is still claimed for a reconnect, but no live stream
+	// occupies it any more.
+	NotifyViewSlotsChanged();
 }
 
 UWorld* UUSRemoteViewSubsystem::GetOwningWorld() const
@@ -552,6 +557,8 @@ void UUSRemoteViewSubsystem::EnsureViewProxyForPlayer(APlayerController* PlayerC
 
 	UE_LOG(LogUnrealSplit, Log, TEXT("Camera stream '%s' created for '%s' in view slot %d (%d stream(s) in this world)."),
 		*Proxy->GetName(), *PlayerController->GetName(), SlotIndex, ViewProxies.Num());
+
+	NotifyViewSlotsChanged();
 }
 
 bool UUSRemoteViewSubsystem::IsViewSlotTaken(int32 SlotIndex) const
@@ -571,16 +578,11 @@ bool UUSRemoteViewSubsystem::IsViewSlotTaken(int32 SlotIndex) const
 
 int32 UUSRemoteViewSubsystem::AssignViewSlot(const APlayerController* PlayerController)
 {
-	const APlayerState* const PlayerState = PlayerController != nullptr ? PlayerController->PlayerState : nullptr;
-	const FUniqueNetIdRepl Identity = PlayerState != nullptr ? PlayerState->GetUniqueId() : FUniqueNetIdRepl();
+	const FViewSlotOwner Owner = MakeSlotOwnerKey(PlayerController);
 
-	if (Identity.IsValid())
+	if (Owner.IsValid())
 	{
-		const int32 PreviousSlot = ViewSlotOwners.IndexOfByPredicate(
-			[&Identity](const FUniqueNetIdRepl& Owner)
-			{
-				return Owner.IsValid() && Owner == Identity;
-			});
+		const int32 PreviousSlot = FindClaimedViewSlot(Owner);
 
 		// Somebody else may have been given the slot while this player was away, in
 		// which case the old claim is stale and it takes a free one below.
@@ -597,12 +599,266 @@ int32 UUSRemoteViewSubsystem::AssignViewSlot(const APlayerController* PlayerCont
 		++FreeSlot;
 	}
 
-	if (!ViewSlotOwners.IsValidIndex(FreeSlot))
-	{
-		ViewSlotOwners.SetNum(FreeSlot + 1);
-	}
-
-	ViewSlotOwners[FreeSlot] = Identity;
+	ClaimViewSlot(FreeSlot, Owner);
 
 	return FreeSlot;
+}
+
+UUSRemoteViewSubsystem::FViewSlotOwner UUSRemoteViewSubsystem::MakeSlotOwnerKey(const APlayerController* PlayerController) const
+{
+	FViewSlotOwner Owner;
+
+	if (PlayerController == nullptr)
+	{
+		return Owner;
+	}
+
+	if (const APlayerState* const PlayerState = PlayerController->PlayerState)
+	{
+		Owner.Identity = PlayerState->GetUniqueId();
+	}
+
+	// Only for a player of this machine. A remote player's platform user belongs to
+	// their machine and means nothing here, so leaving it unset is what makes the
+	// match below fall through to the online id for them.
+	if (const ULocalPlayer* const LocalPlayer = PlayerController->GetLocalPlayer())
+	{
+		Owner.LocalUser = LocalPlayer->GetPlatformUserId();
+	}
+
+	return Owner;
+}
+
+bool UUSRemoteViewSubsystem::DoSlotOwnersMatch(const FViewSlotOwner& First, const FViewSlotOwner& Second)
+{
+	// Platform user first, and only when both sides have one: it is the key that
+	// stays distinct between two people sitting at the same machine, which is
+	// precisely where the online id cannot be trusted to.
+	if (First.LocalUser.IsValid() && Second.LocalUser.IsValid())
+	{
+		return First.LocalUser == Second.LocalUser;
+	}
+
+	return First.Identity.IsValid() && First.Identity == Second.Identity;
+}
+
+void UUSRemoteViewSubsystem::ClaimViewSlot(int32 SlotIndex, const FViewSlotOwner& Owner)
+{
+	if (SlotIndex < 0)
+	{
+		return;
+	}
+
+	if (!ViewSlotOwners.IsValidIndex(SlotIndex))
+	{
+		ViewSlotOwners.SetNum(SlotIndex + 1);
+	}
+
+	ViewSlotOwners[SlotIndex] = Owner;
+}
+
+int32 UUSRemoteViewSubsystem::FindClaimedViewSlot(const FViewSlotOwner& Owner) const
+{
+	if (!Owner.IsValid())
+	{
+		return INDEX_NONE;
+	}
+
+	return ViewSlotOwners.IndexOfByPredicate(
+		[&Owner](const FViewSlotOwner& Existing)
+		{
+			return Existing.IsValid() && DoSlotOwnersMatch(Existing, Owner);
+		});
+}
+
+AUSPlayerViewProxy* UUSRemoteViewSubsystem::FindViewProxyForPlayer(const APlayerController* PlayerController) const
+{
+	if (PlayerController == nullptr)
+	{
+		return nullptr;
+	}
+
+	// The authority spawned every stream and remembers them, so this is exact there.
+	if (const TObjectPtr<AUSPlayerViewProxy>* const Owned = ViewProxies.Find(PlayerController))
+	{
+		if (AUSPlayerViewProxy* const Proxy = Owned->Get())
+		{
+			return Proxy;
+		}
+	}
+
+	// A client has no such table, but a stream is always relevant and carries the
+	// player it belongs to, so its own side is readable from the world. Matched on
+	// the player state rather than the owner, because a client only ever sees its
+	// own controller replicated.
+	UWorld* const World = GetOwningWorld();
+	const APlayerState* const PlayerState = PlayerController->PlayerState;
+
+	if (World == nullptr || PlayerState == nullptr)
+	{
+		return nullptr;
+	}
+
+	for (TActorIterator<AUSPlayerViewProxy> It(World); It; ++It)
+	{
+		if (It->GetOwningPlayerState() == PlayerState)
+		{
+			return *It;
+		}
+	}
+
+	return nullptr;
+}
+
+int32 UUSRemoteViewSubsystem::GetPlayerViewSlot(const APlayerController* PlayerController) const
+{
+	if (const AUSPlayerViewProxy* const Proxy = FindViewProxyForPlayer(PlayerController))
+	{
+		return Proxy->GetViewSlotIndex();
+	}
+
+	// No stream yet. On the authority a claim may already exist — a player that
+	// logged in and had a slot recorded before its proxy was spawned, or one that
+	// travelled — and answering from it keeps a pawn spawn from falling back to
+	// join order for a frame.
+	const int32 ClaimedSlot = FindClaimedViewSlot(MakeSlotOwnerKey(PlayerController));
+
+	return ClaimedSlot;
+}
+
+bool UUSRemoteViewSubsystem::SetPlayerViewSlot(APlayerController* PlayerController, int32 SlotIndex)
+{
+	UWorld* const World = GetOwningWorld();
+
+	if (World == nullptr || PlayerController == nullptr || SlotIndex < 0)
+	{
+		UE_LOG(LogUnrealSplit, Warning, TEXT("SetPlayerViewSlot rejected: no world, no player, or a negative slot."));
+		return false;
+	}
+
+	if (World->GetNetMode() == NM_Client)
+	{
+		UE_LOG(LogUnrealSplit, Warning, TEXT("SetPlayerViewSlot rejected: view slots are decided by the authority."));
+		return false;
+	}
+
+	AUSPlayerViewProxy* const Proxy = FindViewProxyForPlayer(PlayerController);
+
+	if (Proxy == nullptr)
+	{
+		// No stream to carry it yet, but the claim is still worth recording: the
+		// proxy reads it back through AssignViewSlot the moment it is spawned.
+		ClaimViewSlot(SlotIndex, MakeSlotOwnerKey(PlayerController));
+		UE_LOG(LogUnrealSplit, Log, TEXT("View slot %d recorded for '%s' before its camera stream exists."), SlotIndex, *PlayerController->GetName());
+		NotifyViewSlotsChanged();
+		return true;
+	}
+
+	if (Proxy->GetViewSlotIndex() == SlotIndex)
+	{
+		return true;
+	}
+
+	if (IsViewSlotTaken(SlotIndex))
+	{
+		UE_LOG(LogUnrealSplit, Warning, TEXT("SetPlayerViewSlot rejected: view slot %d already belongs to another player; swap the two instead."), SlotIndex);
+		return false;
+	}
+
+	Proxy->SetViewSlotIndex(SlotIndex);
+	ClaimViewSlot(SlotIndex, MakeSlotOwnerKey(PlayerController));
+
+	UE_LOG(LogUnrealSplit, Log, TEXT("'%s' moved to view slot %d."), *PlayerController->GetName(), SlotIndex);
+
+	NotifyViewSlotsChanged();
+
+	return true;
+}
+
+bool UUSRemoteViewSubsystem::SwapPlayerViewSlots(APlayerController* FirstPlayer, APlayerController* SecondPlayer)
+{
+	UWorld* const World = GetOwningWorld();
+
+	if (World == nullptr || FirstPlayer == nullptr || SecondPlayer == nullptr || FirstPlayer == SecondPlayer)
+	{
+		UE_LOG(LogUnrealSplit, Warning, TEXT("SwapPlayerViewSlots rejected: two different players are needed."));
+		return false;
+	}
+
+	if (World->GetNetMode() == NM_Client)
+	{
+		UE_LOG(LogUnrealSplit, Warning, TEXT("SwapPlayerViewSlots rejected: view slots are decided by the authority."));
+		return false;
+	}
+
+	AUSPlayerViewProxy* const FirstProxy = FindViewProxyForPlayer(FirstPlayer);
+	AUSPlayerViewProxy* const SecondProxy = FindViewProxyForPlayer(SecondPlayer);
+
+	if (FirstProxy == nullptr || SecondProxy == nullptr)
+	{
+		UE_LOG(LogUnrealSplit, Warning, TEXT("SwapPlayerViewSlots rejected: one of the players has no camera stream yet."));
+		return false;
+	}
+
+	const int32 FirstSlot = FirstProxy->GetViewSlotIndex();
+	const int32 SecondSlot = SecondProxy->GetViewSlotIndex();
+
+	if (FirstSlot == INDEX_NONE || SecondSlot == INDEX_NONE)
+	{
+		UE_LOG(LogUnrealSplit, Warning, TEXT("SwapPlayerViewSlots rejected: one of the players has no view slot yet."));
+		return false;
+	}
+
+	FirstProxy->SetViewSlotIndex(SecondSlot);
+	SecondProxy->SetViewSlotIndex(FirstSlot);
+
+	ClaimViewSlot(SecondSlot, MakeSlotOwnerKey(FirstPlayer));
+	ClaimViewSlot(FirstSlot, MakeSlotOwnerKey(SecondPlayer));
+
+	UE_LOG(LogUnrealSplit, Log, TEXT("Swapped view slots: '%s' now %d, '%s' now %d."),
+		*FirstPlayer->GetName(), SecondSlot, *SecondPlayer->GetName(), FirstSlot);
+
+	NotifyViewSlotsChanged();
+
+	return true;
+}
+
+void UUSRemoteViewSubsystem::NotifyViewSlotsChanged()
+{
+	OnViewSlotsChanged.Broadcast();
+}
+
+void UUSRemoteViewSubsystem::SetViewSlotLabel(int32 SlotIndex, const FText& Label)
+{
+	if (SlotIndex < 0)
+	{
+		return;
+	}
+
+	if (!ViewSlotLabels.IsValidIndex(SlotIndex))
+	{
+		ViewSlotLabels.SetNum(SlotIndex + 1);
+	}
+
+	ViewSlotLabels[SlotIndex] = Label;
+}
+
+FText UUSRemoteViewSubsystem::GetViewSlotLabel(int32 SlotIndex) const
+{
+	if (ViewSlotLabels.IsValidIndex(SlotIndex) && !ViewSlotLabels[SlotIndex].IsEmpty())
+	{
+		return ViewSlotLabels[SlotIndex];
+	}
+
+	// Two views is the whole range this game can produce, so naming the sides is a
+	// complete fallback rather than a placeholder.
+	switch (SlotIndex)
+	{
+	case 0:
+		return NSLOCTEXT("UnrealSplit", "ViewSlotLeft", "Left");
+	case 1:
+		return NSLOCTEXT("UnrealSplit", "ViewSlotRight", "Right");
+	default:
+		return FText::AsNumber(SlotIndex);
+	}
 }

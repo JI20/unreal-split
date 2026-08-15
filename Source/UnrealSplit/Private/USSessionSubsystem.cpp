@@ -1323,6 +1323,62 @@ void UUSSessionSubsystem::ReturnToEntryMap()
 	UGameplayStatics::OpenLevel(World, FName(*EntryMap), true);
 }
 
+bool UUSSessionSubsystem::TravelSessionToMap(const FString& MapName)
+{
+	UGameInstance* const GameInstance = GetGameInstance();
+	UWorld* const World = GameInstance != nullptr ? GameInstance->GetWorld() : nullptr;
+
+	if (World == nullptr)
+	{
+		UE_LOG(LogUnrealSplit, Warning, TEXT("TravelSessionToMap rejected: no world."));
+		return false;
+	}
+
+	if (World->GetNetMode() == NM_Client)
+	{
+		UE_LOG(LogUnrealSplit, Warning, TEXT("TravelSessionToMap rejected: only the host decides where the session goes."));
+		return false;
+	}
+
+	// Idle is couch co-op, which is a legitimate authority with no session at all.
+	// Every other non-hosting state has an operation in flight whose completion
+	// would land in a world this travel had already replaced.
+	if (SessionState != EUSSessionState::Idle && SessionState != EUSSessionState::Hosting)
+	{
+		UE_LOG(LogUnrealSplit, Warning, TEXT("TravelSessionToMap rejected: state is %s, expected Idle or Hosting."), *UEnum::GetValueAsString(SessionState));
+		return false;
+	}
+
+	const FString DestinationMap = FPackageName::ObjectPathToPackageName(MapName);
+
+	if (DestinationMap.IsEmpty())
+	{
+		UE_LOG(LogUnrealSplit, Warning, TEXT("TravelSessionToMap rejected: no destination map given."));
+		return false;
+	}
+
+	// Carrying ?listen forward is what keeps the session reachable across the
+	// travel: the option is a property of the URL, so a travel that dropped it
+	// would arrive as a standalone game and quietly strand the other player.
+	FString TravelUrl = DestinationMap;
+
+	if (SessionState == EUSSessionState::Hosting)
+	{
+		TravelUrl += TEXT("?listen");
+	}
+
+	UE_LOG(LogUnrealSplit, Log, TEXT("Travelling the session to '%s'."), *TravelUrl);
+
+	// Relative travel: absolute would drop the connections this is meant to carry.
+	if (!World->ServerTravel(TravelUrl, /*bAbsolute*/ false))
+	{
+		UE_LOG(LogUnrealSplit, Error, TEXT("Travel to '%s' was refused by the game mode."), *TravelUrl);
+		return false;
+	}
+
+	return true;
+}
+
 void UUSSessionSubsystem::ClearCreateSessionDelegate()
 {
 	if (!CreateSessionCompleteHandle.IsValid())

@@ -4,6 +4,7 @@
 
 #include "Camera/PlayerCameraManager.h"
 #include "Engine/Engine.h"
+#include "Engine/GameInstance.h"
 #include "Engine/LocalPlayer.h"
 #include "GameFramework/Actor.h"
 #include "GameFramework/PlayerController.h"
@@ -11,6 +12,7 @@
 
 #include "UnrealSplitModule.h"
 #include "USPlayerViewProxy.h"
+#include "USRemoteViewSubsystem.h"
 #include "USShadowLocalPlayer.h"
 #include "USSpectatorPlayerController.h"
 
@@ -567,11 +569,10 @@ int32 UUSGameViewportClient::GetAssignedViewSlot(const ULocalPlayer* Player)
 		return INDEX_NONE;
 	}
 
-	// Only a shadow view can answer this, and it is the only one that has to.
+	// A shadow view answers first, and online that is the only view that needs to.
 	// The slot is a number the server chose for the streamed player and put on the
-	// stream, so it is available on the machine that receives it; the machine's own
-	// player has no such stream to read locally. Two views is the whole range this
-	// game can produce, so knowing one side names the other.
+	// stream, so it is available on the machine that receives it. Two views is the
+	// whole range this game can produce, so knowing one side names the other.
 	if (const AUSSpectatorPlayerController* const Spectator = Cast<AUSSpectatorPlayerController>(Player->PlayerController))
 	{
 		if (const AUSPlayerViewProxy* const Proxy = Spectator->GetViewProxy())
@@ -580,7 +581,28 @@ int32 UUSGameViewportClient::GetAssignedViewSlot(const ULocalPlayer* Player)
 		}
 	}
 
-	return INDEX_NONE;
+	// Couch has no stream to read, but it does not need one: the authority is this
+	// machine, so the slot table is right here. Asking it is what lets a player
+	// choose a side and have the screen follow — without this, couch layout would
+	// stay on creation order and a chosen side would move only the pawn.
+	//
+	// Deliberately authority-only. A client's own slot is readable too, from its
+	// own replicated stream, but finding that stream means walking the world where
+	// the authority answers from a map, and this runs every frame for every view.
+	// The shadow stream already settles a client's layout with one lookup.
+	const APlayerController* const Controller = Player->PlayerController;
+
+	if (Controller == nullptr || !Controller->HasAuthority())
+	{
+		return INDEX_NONE;
+	}
+
+	const UGameInstance* const GameInstance = Player->GetGameInstance();
+	const UUSRemoteViewSubsystem* const RemoteViews = GameInstance != nullptr
+		? GameInstance->GetSubsystem<UUSRemoteViewSubsystem>()
+		: nullptr;
+
+	return RemoteViews != nullptr ? RemoteViews->GetPlayerViewSlot(Controller) : INDEX_NONE;
 }
 
 int32 UUSGameViewportClient::FindPlayer1SlotIndex(const TArray<ULocalPlayer*>& Slots) const
@@ -601,15 +623,15 @@ int32 UUSGameViewportClient::FindPlayer1SlotIndex(const TArray<ULocalPlayer*>& S
 			}
 
 			// The other view is whoever this one is not, so a known slot on either
-			// side settles both: player 1 is this view when the server gave it
-			// slot 0, and the opposite view otherwise.
+			// side settles both: slot 0's view is this one when the authority gave
+			// it slot 0, and the opposite view otherwise.
 			return AssignedSlot == 0 ? SlotIndex : 1 - SlotIndex;
 		}
 	}
 
-	// Couch, or a stream that has not said which slot it owns yet. Local creation
-	// order is join order here, so the first view is player 1 — which is also the
-	// pre-1.6 answer, and why a couch session is unaffected by any of this.
+	// Nobody has said which slot they own yet — before login, or before the first
+	// stream update on a client. Creation order is join order, so the first view is
+	// the one to widen.
 	return 0;
 }
 

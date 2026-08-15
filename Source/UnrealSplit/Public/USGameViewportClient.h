@@ -103,10 +103,14 @@ public:
 	void GetLaidOutSlots(TArray<ULocalPlayer*>& OutSlots) const;
 
 	/**
-	 * Index in the laid-out slots of the view that represents player 1 — the player
-	 * the authority put in slot 0. INDEX_NONE only when there are no slots at all;
-	 * with nothing better to go on it answers 0, since local creation order is join
-	 * order on the one machine that has no stream to read an assignment from.
+	 * Index in the laid-out slots of the view showing view slot 0, which is the
+	 * width Player1Share names. INDEX_NONE only when there are no slots at all;
+	 * with nothing better to go on it answers 0, since creation order is join order.
+	 *
+	 * Slot 0 is player 1 as long as nothing reassigns slots, which is the default
+	 * everywhere. A game that lets players pick a side is choosing who slot 0 is,
+	 * and Player1Share follows the slot rather than the person — the share belongs
+	 * to a half of the screen, and that is the reading that stays true either way.
 	 */
 	int32 FindPlayer1SlotIndex(const TArray<ULocalPlayer*>& Slots) const;
 

@@ -182,6 +182,25 @@ public:
 	void LeaveSession();
 
 	/**
+	 * Takes everyone in this session to another map, keeping the session alive.
+	 *
+	 * The forward counterpart to the entry-map return: that one ends a session and
+	 * goes back, this one carries it onward, and both exist so a game never has to
+	 * reach past the plugin for travel and get the listen server or the local
+	 * players wrong.
+	 *
+	 * Gated on being the authority rather than on holding a session, because couch
+	 * co-op has no session at all and still has to travel the same way — standalone
+	 * is its own authority and a server travel carries every local player with it.
+	 * A client is refused: the host decides where the session goes.
+	 *
+	 * @param MapName Package name or path of the destination map.
+	 * @return Whether the travel was started.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "UnrealSplit|Session")
+	bool TravelSessionToMap(const FString& MapName);
+
+	/**
 	 * Adds a couch co-op player on this machine. The new player gets the next
 	 * platform user, which on desktop pairs it with the matching gamepad while
 	 * keyboard/mouse stay with player 1. That user is logged into the online

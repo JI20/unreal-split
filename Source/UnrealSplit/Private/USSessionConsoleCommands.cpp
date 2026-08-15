@@ -118,6 +118,36 @@ static FAutoConsoleCommandWithWorldArgsAndOutputDevice GUSLeaveCommand(
 		}
 	}));
 
+static FAutoConsoleCommandWithWorldArgsAndOutputDevice GUSTravelCommand(
+	TEXT("US.Travel"),
+	TEXT("UnrealSplit: take everyone in this session to another map, keeping the session and every local player. Usage: US.Travel <MapName>. Host or standalone only; couch co-op has no session and travels the same way."),
+	FConsoleCommandWithWorldArgsAndOutputDeviceDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World, FOutputDevice& Ar)
+	{
+		UUSSessionSubsystem* const Sessions = USConsole::FindSubsystem<UUSSessionSubsystem>(World, Ar);
+		if (Sessions == nullptr)
+		{
+			return;
+		}
+
+		if (Args.Num() < 1)
+		{
+			ReportWarning(Ar, TEXT("US.Travel: needs a destination. Usage: US.Travel <MapName>, e.g. US.Travel /Game/Maps/L_Game."));
+			return;
+		}
+
+		const FString& MapName = Args[0];
+
+		if (Sessions->TravelSessionToMap(MapName))
+		{
+			Report(Ar, FString::Printf(TEXT("US.Travel: travelling to '%s'."), *MapName));
+		}
+		else
+		{
+			// The subsystem's own line says which refusal it was.
+			ReportWarning(Ar, FString::Printf(TEXT("US.Travel: could not travel to '%s'."), *MapName));
+		}
+	}));
+
 static FAutoConsoleCommandWithWorldArgsAndOutputDevice GUSAddLocalPlayerCommand(
 	TEXT("US.AddLocalPlayer"),
 	TEXT("UnrealSplit: add a couch co-op player on this machine (vertical splitscreen). On a joined client this asks the host for a split join, which needs a free public connection there."),

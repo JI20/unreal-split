@@ -83,6 +83,50 @@ namespace
 	}
 
 	/**
+	 * The nth player of this world, for commands that have to name one.
+	 *
+	 * A console command has no owning player, so anything that acts on a
+	 * particular player needs an index — and login order is the one ordering that
+	 * means the same thing in couch and online: index 0 is the host's own player
+	 * in both, and US.ViewState lists players in an order derived from it.
+	 *
+	 * Shadow controllers are skipped. They exist to render somebody else's camera
+	 * and are not players, so counting them would silently shift every index by
+	 * one the moment a session started.
+	 */
+	APlayerController* FindPlayerByIndex(UWorld* World, int32 PlayerIndex, FOutputDevice& Ar, const TCHAR* CommandName)
+	{
+		if (World == nullptr || PlayerIndex < 0)
+		{
+			ReportWarning(Ar, FString::Printf(TEXT("%s: '%d' is not a player index."), CommandName, PlayerIndex));
+			return nullptr;
+		}
+
+		int32 FoundPlayers = 0;
+
+		for (FConstPlayerControllerIterator It = World->GetPlayerControllerIterator(); It; ++It)
+		{
+			APlayerController* const Player = It->Get();
+
+			if (Player == nullptr || UUSShadowLocalPlayer::IsShadowController(Player))
+			{
+				continue;
+			}
+
+			if (FoundPlayers == PlayerIndex)
+			{
+				return Player;
+			}
+
+			++FoundPlayers;
+		}
+
+		ReportWarning(Ar, FString::Printf(TEXT("%s: there is no player %d — this world has %d. On a client only this machine's own players are visible, so run it on the host."),
+			CommandName, PlayerIndex, FoundPlayers));
+		return nullptr;
+	}
+
+	/**
 	 * Whether a remote machine can resolve a reference to this actor.
 	 *
 	 * Two separate routes, and a level-placed camera takes the second one: a
@@ -457,6 +501,8 @@ static FAutoConsoleCommandWithWorldArgsAndOutputDevice GUSViewStateCommand(
 		Report(Ar, FString::Printf(TEXT("Local views: %d (%d played by someone here). One view is laid out full screen; the split needs two."),
 			GEngine->GetNumGamePlayers(World), RealPlayers));
 
+		const UUSRemoteViewSubsystem* const RemoteViews = World->GetGameInstance()->GetSubsystem<UUSRemoteViewSubsystem>();
+
 		if (const UUSGameViewportClient* const Viewport = Cast<UUSGameViewportClient>(World->GetGameInstance()->GetGameViewportClient()))
 		{
 			TArray<ULocalPlayer*> Slots;
@@ -489,7 +535,13 @@ static FAutoConsoleCommandWithWorldArgsAndOutputDevice GUSViewStateCommand(
 				// The assigned slot is the number the ordering actually runs on, so it
 				// is worth seeing next to the name: a stream still showing "-" is why
 				// a machine is laid out in creation order rather than by identity.
-				Report(Ar, FString::Printf(TEXT("  Slot %d (%s): %s '%s' (PlayerId %s, assigned slot %s, FOV %s)%s"),
+				// Its label is what a lobby would be showing for that side, which is
+				// how a wrong pick and a wrong layout are told apart.
+				const FText AssignedLabel = RemoteViews != nullptr && AssignedSlot != INDEX_NONE
+					? RemoteViews->GetViewSlotLabel(AssignedSlot)
+					: FText::GetEmpty();
+
+				Report(Ar, FString::Printf(TEXT("  Slot %d (%s): %s '%s' (PlayerId %s, assigned slot %s%s, FOV %s)%s"),
 					SlotIndex,
 					SlotIndex == 0 ? TEXT("left") : TEXT("right"),
 					bShadow ? TEXT("shadow of") : TEXT("local"),
@@ -498,16 +550,90 @@ static FAutoConsoleCommandWithWorldArgsAndOutputDevice GUSViewStateCommand(
 						? *FString::FromInt(SlotState->GetPlayerId())
 						: TEXT("?"),
 					AssignedSlot != INDEX_NONE ? *FString::FromInt(AssignedSlot) : TEXT("-"),
+					AssignedLabel.IsEmpty() ? TEXT("") : *FString::Printf(TEXT(" '%s'"), *AssignedLabel.ToString()),
 					SlotCamera != nullptr ? *FString::Printf(TEXT("%.2f"), SlotCamera->GetFOVAngle()) : TEXT("?"),
 					bIsPlayer1 ? TEXT(" — player 1") : TEXT("")));
 			}
 		}
 
-		if (const UUSRemoteViewSubsystem* const RemoteView = World->GetGameInstance()->GetSubsystem<UUSRemoteViewSubsystem>())
+		if (RemoteViews != nullptr)
 		{
 			Report(Ar, FString::Printf(TEXT("Remote view: %s on this machine; shadow view %s"),
-				RemoteView->IsRemoteViewEnabled() ? TEXT("enabled") : TEXT("disabled (US.RemoteView on)"),
-				*RemoteView->DescribeShadowViewState()));
+				RemoteViews->IsRemoteViewEnabled() ? TEXT("enabled") : TEXT("disabled (US.RemoteView on)"),
+				*RemoteViews->DescribeShadowViewState()));
+		}
+	}));
+
+static FAutoConsoleCommandWithWorldArgsAndOutputDevice GUSSetViewSlotCommand(
+	TEXT("US.SetViewSlot"),
+	TEXT("UnrealSplit: put a player in a view slot. Usage: US.SetViewSlot <PlayerIndex> <SlotIndex>. Player indices are login order on the host (0 is the host's own player), the same order US.ViewState lists. Host or standalone only; a slot another player already holds is refused, so use US.SwapViewSlots to trade sides."),
+	FConsoleCommandWithWorldArgsAndOutputDeviceDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World, FOutputDevice& Ar)
+	{
+		UUSRemoteViewSubsystem* const RemoteViews = USConsole::FindSubsystem<UUSRemoteViewSubsystem>(World, Ar);
+		if (RemoteViews == nullptr)
+		{
+			return;
+		}
+
+		if (Args.Num() < 2)
+		{
+			ReportWarning(Ar, TEXT("US.SetViewSlot: needs both arguments. Usage: US.SetViewSlot <PlayerIndex> <SlotIndex>."));
+			return;
+		}
+
+		const int32 PlayerIndex = FCString::Atoi(*Args[0]);
+		const int32 SlotIndex = FCString::Atoi(*Args[1]);
+
+		APlayerController* const Player = FindPlayerByIndex(World, PlayerIndex, Ar, TEXT("US.SetViewSlot"));
+		if (Player == nullptr)
+		{
+			return;
+		}
+
+		if (RemoteViews->SetPlayerViewSlot(Player, SlotIndex))
+		{
+			Report(Ar, FString::Printf(TEXT("US.SetViewSlot: player %d ('%s') is now in view slot %d ('%s')."),
+				PlayerIndex, *GetNameSafe(Player->PlayerState), SlotIndex, *RemoteViews->GetViewSlotLabel(SlotIndex).ToString()));
+		}
+		else
+		{
+			// The subsystem's own line says which refusal it was.
+			ReportWarning(Ar, FString::Printf(TEXT("US.SetViewSlot: could not put player %d in view slot %d."), PlayerIndex, SlotIndex));
+		}
+	}));
+
+static FAutoConsoleCommandWithWorldArgsAndOutputDevice GUSSwapViewSlotsCommand(
+	TEXT("US.SwapViewSlots"),
+	TEXT("UnrealSplit: exchange two players' view slots, which trades their halves of the screen on every machine. Usage: US.SwapViewSlots [FirstPlayer] [SecondPlayer] (defaults to 0 and 1). Host or standalone only."),
+	FConsoleCommandWithWorldArgsAndOutputDeviceDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World, FOutputDevice& Ar)
+	{
+		UUSRemoteViewSubsystem* const RemoteViews = USConsole::FindSubsystem<UUSRemoteViewSubsystem>(World, Ar);
+		if (RemoteViews == nullptr)
+		{
+			return;
+		}
+
+		const int32 FirstPlayerIndex = Args.Num() > 0 ? FCString::Atoi(*Args[0]) : 0;
+		const int32 SecondPlayerIndex = Args.Num() > 1 ? FCString::Atoi(*Args[1]) : 1;
+
+		APlayerController* const FirstPlayer = FindPlayerByIndex(World, FirstPlayerIndex, Ar, TEXT("US.SwapViewSlots"));
+		APlayerController* const SecondPlayer = FindPlayerByIndex(World, SecondPlayerIndex, Ar, TEXT("US.SwapViewSlots"));
+
+		if (FirstPlayer == nullptr || SecondPlayer == nullptr)
+		{
+			return;
+		}
+
+		if (RemoteViews->SwapPlayerViewSlots(FirstPlayer, SecondPlayer))
+		{
+			Report(Ar, FString::Printf(TEXT("US.SwapViewSlots: players %d and %d traded sides — %d is now slot %d, %d is now slot %d."),
+				FirstPlayerIndex, SecondPlayerIndex,
+				FirstPlayerIndex, RemoteViews->GetPlayerViewSlot(FirstPlayer),
+				SecondPlayerIndex, RemoteViews->GetPlayerViewSlot(SecondPlayer)));
+		}
+		else
+		{
+			ReportWarning(Ar, FString::Printf(TEXT("US.SwapViewSlots: could not swap the view slots of players %d and %d."), FirstPlayerIndex, SecondPlayerIndex));
 		}
 	}));
 

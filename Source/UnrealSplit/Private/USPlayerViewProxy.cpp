@@ -136,8 +136,19 @@ void AUSPlayerViewProxy::InitializeForPlayer(APlayerController* OwningController
 	SetOwner(OwningController);
 	OwningPlayerState = OwningController->PlayerState;
 
-	ViewSlotIndex = (AssignedViewSlotIndex >= 0 && AssignedViewSlotIndex < MAX_uint8)
-		? static_cast<uint8>(AssignedViewSlotIndex)
+	SetViewSlotIndex(AssignedViewSlotIndex);
+}
+
+void AUSPlayerViewProxy::SetViewSlotIndex(int32 NewViewSlotIndex)
+{
+	if (!HasAuthority())
+	{
+		UE_LOG(LogUnrealSplit, Warning, TEXT("View proxy '%s' was given a view slot off the authority; ignored."), *GetName());
+		return;
+	}
+
+	ViewSlotIndex = (NewViewSlotIndex >= 0 && NewViewSlotIndex < MAX_uint8)
+		? static_cast<uint8>(NewViewSlotIndex)
 		: MAX_uint8;
 }
 
@@ -247,6 +258,17 @@ void AUSPlayerViewProxy::ServerUpdateViewSample_Implementation(FUSViewSample Sam
 void AUSPlayerViewProxy::OnRep_ViewSample()
 {
 	AcceptSample(ViewSample);
+}
+
+void AUSPlayerViewProxy::OnRep_ViewSlotIndex()
+{
+	if (UGameInstance* const GameInstance = GetGameInstance())
+	{
+		if (UUSRemoteViewSubsystem* const RemoteViews = GameInstance->GetSubsystem<UUSRemoteViewSubsystem>())
+		{
+			RemoteViews->NotifyViewSlotsChanged();
+		}
+	}
 }
 
 void AUSPlayerViewProxy::ResetPlaybackState()

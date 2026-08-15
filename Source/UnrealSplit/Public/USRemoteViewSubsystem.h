@@ -17,6 +17,17 @@ class UUSShadowLocalPlayer;
 class UWorld;
 
 /**
+ * Somebody's view slot changed, on this machine.
+ *
+ * Parameterless because a side picker has to redraw every side anyway: a swap
+ * moves two players at once, and a UI told only about one of them would show a
+ * stale name next to the other. Fires on every machine — the authority when it
+ * decides, a client when the decision arrives — so the same widget works on both
+ * without a second path for the client.
+ */
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FUSOnViewSlotsChanged);
+
+/**
  * Puts the remote partner on this machine's screen.
  *
  * Online, each machine simulates the whole world but renders only its own view.
@@ -81,11 +92,75 @@ public:
 	/** Why there is no shadow view right now, in one sentence, for US.ViewState. */
 	FString DescribeShadowViewState() const;
 
+	/**
+	 * The view slot this player owns, or INDEX_NONE if it has none yet.
+	 *
+	 * Answers on any machine, not only the authority: the slot rides on the
+	 * player's own camera stream, which is always relevant, so a client can read
+	 * its own side without asking the server for it.
+	 */
+	UFUNCTION(BlueprintPure, Category = "UnrealSplit|View")
+	int32 GetPlayerViewSlot(const APlayerController* PlayerController) const;
+
+	/**
+	 * Moves a player to a view slot. Authority only.
+	 *
+	 * Refuses a slot another live stream already holds, because displacing that
+	 * player would leave two of them claiming one side and no rule for which one
+	 * the layout should believe. Trading two players' sides is what
+	 * SwapPlayerViewSlots is for, and it is the operation a side picker wants.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "UnrealSplit|View")
+	bool SetPlayerViewSlot(APlayerController* PlayerController, int32 SlotIndex);
+
+	/**
+	 * Exchanges two players' view slots in one step. Authority only.
+	 *
+	 * Atomic on purpose: done as two assignments, the first would have to pass
+	 * through a state where both players claim one slot, which SetPlayerViewSlot
+	 * refuses by design.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "UnrealSplit|View")
+	bool SwapPlayerViewSlots(APlayerController* FirstPlayer, APlayerController* SecondPlayer);
+
+	/**
+	 * Names a slot for anything that shows one to a person.
+	 *
+	 * The plugin never interprets these. A game that binds its characters to
+	 * sides sets them from its own data, and a lobby can then offer "Elmar" and
+	 * "Kit" while every line of code here still only knows about slot 0 and slot
+	 * 1. Local and unreplicated: both machines derive the same labels from the
+	 * same content, so sending them would only be a way for the two to disagree.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "UnrealSplit|View")
+	void SetViewSlotLabel(int32 SlotIndex, const FText& Label);
+
+	/** The name set for a slot, or a plain Left/Right fallback when the game set none. */
+	UFUNCTION(BlueprintPure, Category = "UnrealSplit|View")
+	FText GetViewSlotLabel(int32 SlotIndex) const;
+
+	/**
+	 * Fires whenever any player's view slot changes on this machine.
+	 *
+	 * What a side picker binds to instead of polling. Bound on both machines, and
+	 * on the receiving one it is driven by the slot property arriving rather than
+	 * by anything the game does, so a client's picker updates the moment the
+	 * server's decision lands.
+	 */
+	UPROPERTY(BlueprintAssignable, Category = "UnrealSplit|View")
+	FUSOnViewSlotsChanged OnViewSlotsChanged;
+
 	/** Called by a proxy once it has a sample to show. */
 	void NotifyRemoteStreamLive(AUSPlayerViewProxy* Proxy);
 
 	/** Called by a proxy as it goes away, for any reason. */
 	void NotifyRemoteStreamLost(AUSPlayerViewProxy* Proxy);
+
+	/**
+	 * Called by a proxy when its replicated slot arrives or changes, and by this
+	 * subsystem's own authority-side moves. Broadcasts OnViewSlotsChanged.
+	 */
+	void NotifyViewSlotsChanged();
 
 private:
 	/** This game instance's world, or null between worlds. */
@@ -140,6 +215,42 @@ private:
 	/** True while a live stream already sits in this slot. */
 	bool IsViewSlotTaken(int32 SlotIndex) const;
 
+	/** The live stream carrying this player's camera, on any machine, or null. */
+	AUSPlayerViewProxy* FindViewProxyForPlayer(const APlayerController* PlayerController) const;
+
+	/**
+	 * Who owns a view slot, in whichever terms are actually stable for that player.
+	 *
+	 * Two different keys because the two kinds of player have two different stable
+	 * identities. A remote player has an online id and nothing else this machine
+	 * can rely on. A local player has a platform user, and crucially may *not*
+	 * have a usable online id: a backend that derives ids from the machine alone
+	 * hands every couch player the same one, which would collapse both of them
+	 * onto a single claim and make a swap or a post-travel restore ambiguous.
+	 */
+	struct FViewSlotOwner
+	{
+		/** Remote players, and local ones where the backend minted a distinct id. */
+		FUniqueNetIdRepl Identity;
+
+		/** Local players on this machine, which survives travel with them. */
+		FPlatformUserId LocalUser = PLATFORMUSERID_NONE;
+
+		bool IsValid() const { return Identity.IsValid() || LocalUser.IsValid(); }
+	};
+
+	/** The stable key for this player, for claiming and reclaiming a slot. */
+	FViewSlotOwner MakeSlotOwnerKey(const APlayerController* PlayerController) const;
+
+	/** True when both keys name the same player, preferring the platform user. */
+	static bool DoSlotOwnersMatch(const FViewSlotOwner& First, const FViewSlotOwner& Second);
+
+	/** Records a slot claim, growing the table as needed. */
+	void ClaimViewSlot(int32 SlotIndex, const FViewSlotOwner& Owner);
+
+	/** The slot this player last claimed, or INDEX_NONE. */
+	int32 FindClaimedViewSlot(const FViewSlotOwner& Owner) const;
+
 	UPROPERTY(Transient)
 	TObjectPtr<UUSShadowLocalPlayer> ShadowPlayer;
 
@@ -160,7 +271,13 @@ private:
 	 * lets a reconnect land back on the same side. A slot is only handed to someone
 	 * else once nobody is streaming from it.
 	 */
-	TArray<FUniqueNetIdRepl> ViewSlotOwners;
+	TArray<FViewSlotOwner> ViewSlotOwners;
+
+	/**
+	 * Game-supplied names for slots, indexed by slot. Empty entries fall back to
+	 * Left and Right, so a game that sets nothing still gets a usable side picker.
+	 */
+	TArray<FText> ViewSlotLabels;
 
 	/**
 	 * Guards the local-player events against the shadow player's own creation:

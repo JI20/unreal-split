@@ -79,6 +79,17 @@ public:
 	int32 GetViewSlotIndex() const;
 
 	/**
+	 * Moves this player to another view slot, authority only.
+	 *
+	 * Assigned once at login and then left alone for most of a session, but not
+	 * immutable: a game that lets players pick a side needs the authority to be
+	 * able to change its mind, and the replicated property is what carries that
+	 * decision to the other machine. Layout follows on its own, because the
+	 * viewport client re-runs its slot maths every frame.
+	 */
+	void SetViewSlotIndex(int32 NewViewSlotIndex);
+
+	/**
 	 * True on the one machine where this player is a local player, which is the
 	 * machine that samples and sends. Everywhere else this proxy is a receiver.
 	 *
@@ -149,6 +160,16 @@ private:
 	UFUNCTION()
 	void OnRep_ViewSample();
 
+	/**
+	 * Tells the subsystem a slot arrived, so a side picker on this machine redraws.
+	 *
+	 * Needed because a receiver has no other signal: the authority's decision is
+	 * only ever visible here as this property changing, and a UI that waited for a
+	 * game-side event would wait forever on a client.
+	 */
+	UFUNCTION()
+	void OnRep_ViewSlotIndex();
+
 	/** Takes one sample from either arrival path into the interpolation buffer. */
 	void AcceptSample(const FUSViewSample& Sample);
 
@@ -178,7 +199,7 @@ private:
 	 * Which view slot this player owns, authority-assigned. MAX_uint8 until then,
 	 * which reads as INDEX_NONE through the accessor.
 	 */
-	UPROPERTY(Replicated)
+	UPROPERTY(ReplicatedUsing = OnRep_ViewSlotIndex)
 	uint8 ViewSlotIndex = MAX_uint8;
 
 	/** Moves the playback clock on by one frame and reports where it now points. */
