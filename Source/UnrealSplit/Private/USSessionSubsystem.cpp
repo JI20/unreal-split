@@ -52,6 +52,16 @@ namespace
 	const FName SessionBucketIdKey(TEXT("OSSEOS_BUCKET_ID_ATTRIBUTE_KEY"));
 
 	/**
+	 * Find-list snapshot. Short names: some backends cap attribute name length,
+	 * and a dotted UnrealSplit prefix is unnecessary uniqueness against the bucket
+	 * key above.
+	 */
+	const FName AdvertisedPhaseKey(TEXT("USADVPHASE"));
+	const FName AdvertisedLabelsKey(TEXT("USADVLBL"));
+	const FName AdvertisedOccupiedKey(TEXT("USADVOCC"));
+	const FName AdvertisedExtraKey(TEXT("USADVXTRA"));
+
+	/**
 	 * Name half of the bucket. The build half comes from GetBuildUniqueId, so two
 	 * incompatible builds cannot discover each other — the same separation the
 	 * backend's own default gives, kept deliberately rather than by accident.
@@ -77,6 +87,23 @@ namespace
 		const UGameInstance* GameInstance = Subsystem ? Subsystem->GetGameInstance() : nullptr;
 		const UWorld* World = GameInstance ? GameInstance->GetWorld() : nullptr;
 		return World ? Online::GetIdentityInterface(World) : nullptr;
+	}
+
+	bool ReadIntSetting(const FOnlineSessionSettings& Settings, FName Key, int32& OutValue)
+	{
+		if (Settings.Get(Key, OutValue))
+		{
+			return true;
+		}
+
+		FString AsString;
+		if (Settings.Get(Key, AsString) && AsString.IsNumeric())
+		{
+			OutValue = FCString::Atoi(*AsString);
+			return true;
+		}
+
+		return false;
 	}
 }
 
@@ -359,7 +386,7 @@ bool UUSSessionSubsystem::EnsureBackendReady(const TCHAR* Context)
 	return false;
 }
 
-void UUSSessionSubsystem::HostSession(int32 MaxPlayers)
+void UUSSessionSubsystem::HostSession(int32 MaxPlayers, const FString& TravelToMap)
 {
 	if (SessionState != EUSSessionState::Idle)
 	{
@@ -414,6 +441,9 @@ void UUSSessionSubsystem::HostSession(int32 MaxPlayers)
 	Settings.bAllowJoinViaPresenceFriendsOnly = false;
 	Settings.bAllowInvites = false;
 	ApplyDiscoveryKeys(Settings);
+	ApplyAdvertisedSessionState(Settings);
+
+	PendingHostTravelMap = FPackageName::ObjectPathToPackageName(TravelToMap);
 
 	const uint32 OperationId = BeginOperation();
 	SetSessionState(EUSSessionState::Creating);
@@ -441,6 +471,142 @@ void UUSSessionSubsystem::HostSession(int32 MaxPlayers)
 	}
 }
 
+void UUSSessionSubsystem::SetAdvertisedSessionState(const FUSAdvertisedSessionState& State)
+{
+	if (SessionState == EUSSessionState::InSessionAsClient
+		|| SessionState == EUSSessionState::Joining
+		|| SessionState == EUSSessionState::Leaving)
+	{
+		UE_LOG(LogUnrealSplit, Warning, TEXT("SetAdvertisedSessionState refused: only the host writes the Find-list snapshot (state is %s)."),
+			*UEnum::GetValueAsString(SessionState));
+		return;
+	}
+
+	AdvertisedSessionState = State;
+
+	UE_LOG(LogUnrealSplit, Log, TEXT("Advertised session snapshot: %s"),
+		*AdvertisedSessionState.GetFindListSummary());
+
+	if (SessionState == EUSSessionState::Hosting)
+	{
+		PushAdvertisedSessionStateToBackend();
+	}
+}
+
+void UUSSessionSubsystem::ApplyAdvertisedSessionState(FOnlineSessionSettings& Settings) const
+{
+	if (AdvertisedSessionState.Phase == EUSAdvertisedSessionPhase::Unknown)
+	{
+		Settings.Remove(AdvertisedPhaseKey);
+		Settings.Remove(AdvertisedLabelsKey);
+		Settings.Remove(AdvertisedOccupiedKey);
+		Settings.Remove(AdvertisedExtraKey);
+		return;
+	}
+
+	int32 Phase = 0;
+	FString Labels;
+	int32 Occupied = 0;
+	FString Extra;
+	AdvertisedSessionState.Pack(Phase, Labels, Occupied, Extra);
+
+	const EOnlineDataAdvertisementType::Type Advertise = EOnlineDataAdvertisementType::ViaOnlineService;
+	Settings.Set(AdvertisedPhaseKey, Phase, Advertise);
+	Settings.Set(AdvertisedLabelsKey, Labels, Advertise);
+	Settings.Set(AdvertisedOccupiedKey, Occupied, Advertise);
+
+	if (Extra.IsEmpty())
+	{
+		Settings.Remove(AdvertisedExtraKey);
+	}
+	else
+	{
+		Settings.Set(AdvertisedExtraKey, Extra, Advertise);
+	}
+}
+
+FUSAdvertisedSessionState UUSSessionSubsystem::ReadAdvertisedSessionState(const FOnlineSessionSettings& Settings)
+{
+	int32 Phase = 0;
+	if (!ReadIntSetting(Settings, AdvertisedPhaseKey, Phase))
+	{
+		return FUSAdvertisedSessionState();
+	}
+
+	FString Labels;
+	Settings.Get(AdvertisedLabelsKey, Labels);
+
+	int32 Occupied = 0;
+	ReadIntSetting(Settings, AdvertisedOccupiedKey, Occupied);
+
+	FString Extra;
+	Settings.Get(AdvertisedExtraKey, Extra);
+
+	return FUSAdvertisedSessionState::Unpack(Phase, Labels, Occupied, Extra);
+}
+
+void UUSSessionSubsystem::PushAdvertisedSessionStateToBackend()
+{
+	if (SessionState != EUSSessionState::Hosting)
+	{
+		return;
+	}
+
+	if (bAdvertisementUpdateInFlight)
+	{
+		bAdvertisementDirty = true;
+		return;
+	}
+
+	const IOnlineSessionPtr Sessions = GetSessionInterface(this);
+	FNamedOnlineSession* const NamedSession = Sessions.IsValid() ? Sessions->GetNamedSession(NAME_GameSession) : nullptr;
+
+	if (NamedSession == nullptr)
+	{
+		UE_LOG(LogUnrealSplit, Warning, TEXT("Cannot push the Find-list snapshot: no session is registered with the backend."));
+		return;
+	}
+
+	FOnlineSessionSettings Settings = NamedSession->SessionSettings;
+	ApplyAdvertisedSessionState(Settings);
+
+	ClearUpdateSessionDelegate();
+	UpdateSessionCompleteHandle = Sessions->AddOnUpdateSessionCompleteDelegate_Handle(
+		FOnUpdateSessionCompleteDelegate::CreateWeakLambda(this, [this](FName SessionName, bool bWasSuccessful)
+		{
+			OnUpdateSessionFinished(SessionName, bWasSuccessful);
+		}));
+
+	bAdvertisementUpdateInFlight = true;
+	bAdvertisementDirty = false;
+
+	UE_LOG(LogUnrealSplit, Log, TEXT("Updating advertised session snapshot (%s)."),
+		*AdvertisedSessionState.GetFindListSummary());
+
+	if (!Sessions->UpdateSession(NAME_GameSession, Settings, true) && bAdvertisementUpdateInFlight)
+	{
+		UE_LOG(LogUnrealSplit, Warning, TEXT("UpdateSession was rejected by the backend before going async; the Find list may stay stale."));
+		OnUpdateSessionFinished(NAME_GameSession, false);
+	}
+}
+
+void UUSSessionSubsystem::OnUpdateSessionFinished(FName /*SessionName*/, bool bWasSuccessful)
+{
+	ClearUpdateSessionDelegate();
+	bAdvertisementUpdateInFlight = false;
+
+	if (!bWasSuccessful)
+	{
+		UE_LOG(LogUnrealSplit, Warning, TEXT("UpdateSession reported failure; searchers may still see the previous Find-list snapshot."));
+	}
+
+	if (bAdvertisementDirty && SessionState == EUSSessionState::Hosting)
+	{
+		bAdvertisementDirty = false;
+		PushAdvertisedSessionStateToBackend();
+	}
+}
+
 void UUSSessionSubsystem::OnCreateSessionFinished(uint32 OperationId, bool bWasSuccessful)
 {
 	ClearCreateSessionDelegate();
@@ -448,6 +614,7 @@ void UUSSessionSubsystem::OnCreateSessionFinished(uint32 OperationId, bool bWasS
 	if (!ConsumeOperation(OperationId))
 	{
 		UE_LOG(LogUnrealSplit, Log, TEXT("Ignoring a CreateSession completion that is no longer current (Success=%d)."), bWasSuccessful ? 1 : 0);
+		PendingHostTravelMap.Empty();
 		if (bWasSuccessful)
 		{
 			DestroyLeftoverSession(TEXT("an abandoned HostSession"));
@@ -463,12 +630,18 @@ void UUSSessionSubsystem::OnCreateSessionFinished(uint32 OperationId, bool bWasS
 		UE_LOG(LogUnrealSplit, Error, TEXT("Session creation failed (Success=%d World=%s)."), bWasSuccessful ? 1 : 0, World ? TEXT("valid") : TEXT("null"));
 
 		SetSessionState(EUSSessionState::Idle);
+		PendingHostTravelMap.Empty();
 		DestroyLeftoverSession(TEXT("a failed HostSession"));
 		OnSessionHostedDelegate.Broadcast(false);
 		return;
 	}
 
 	SetSessionState(EUSSessionState::Hosting);
+
+	if (AdvertisedSessionState.Phase != EUSAdvertisedSessionPhase::Unknown)
+	{
+		PushAdvertisedSessionStateToBackend();
+	}
 
 	// The listen reopen below re-runs every local login, and the PostLogin hook
 	// registers players then too. Registering here as well covers flows that
@@ -479,9 +652,18 @@ void UUSSessionSubsystem::OnCreateSessionFinished(uint32 OperationId, bool bWasS
 	// InProgress, which backends treat as no longer joinable unless join-in-
 	// progress is allowed. Co-op wants join-in-progress, and staying Pending
 	// keeps the session findable without depending on that flag being honoured.
-	const FString CurrentMap = UGameplayStatics::GetCurrentLevelName(World);
-	UE_LOG(LogUnrealSplit, Log, TEXT("Session created. Reopening '%s' as a listen server."), *CurrentMap);
-	UGameplayStatics::OpenLevel(World, FName(*CurrentMap), true, TEXT("listen"));
+	FString ListenMap = PendingHostTravelMap;
+	PendingHostTravelMap.Empty();
+
+	if (ListenMap.IsEmpty())
+	{
+		ListenMap = World->GetOutermost() != nullptr
+			? World->GetOutermost()->GetName()
+			: UGameplayStatics::GetCurrentLevelName(World);
+	}
+
+	UE_LOG(LogUnrealSplit, Log, TEXT("Session created. Opening '%s' as a listen server."), *ListenMap);
+	UGameplayStatics::OpenLevel(World, FName(*ListenMap), true, TEXT("listen"));
 
 	OnSessionHostedDelegate.Broadcast(true);
 }
@@ -579,6 +761,7 @@ void UUSSessionSubsystem::OnFindSessionsFinished(uint32 OperationId, bool bWasSu
 			Info.PingInMs = Result.PingInMs;
 			Info.OpenPublicConnections = Result.Session.NumOpenPublicConnections;
 			Info.MaxPublicConnections = Result.Session.SessionSettings.NumPublicConnections;
+			Info.Advertised = ReadAdvertisedSessionState(Result.Session.SessionSettings);
 		}
 	}
 	else
@@ -600,8 +783,9 @@ void UUSSessionSubsystem::OnFindSessionsFinished(uint32 OperationId, bool bWasSu
 	for (int32 Index = 0; Index < FoundSessions.Num(); ++Index)
 	{
 		const FUSSessionSearchResultInfo& Info = FoundSessions[Index];
-		USConsole::ReportAsync(GetGameInstance(), FString::Printf(TEXT("  [%d] Id='%s' Owner='%s' Ping=%dms Slots=%d/%d — join with US.Join %d"),
-			Index, *Info.SessionId, *Info.OwnerName, Info.PingInMs, Info.OpenPublicConnections, Info.MaxPublicConnections, Index));
+		USConsole::ReportAsync(GetGameInstance(), FString::Printf(TEXT("  [%d] Id='%s' Owner='%s' Ping=%dms Slots=%d/%d Adv='%s' — join with US.Join %d"),
+			Index, *Info.SessionId, *Info.OwnerName, Info.PingInMs, Info.OpenPublicConnections, Info.MaxPublicConnections,
+			*Info.Advertised.GetFindListSummary(), Index));
 	}
 
 	if (bWasSuccessful && RawResults == 0)
@@ -1031,6 +1215,10 @@ void UUSSessionSubsystem::AbortSession(const FString& Reason)
 	// stale id and destroys what the backend registered behind our back.
 	const uint32 OperationId = BeginOperation();
 
+	ClearUpdateSessionDelegate();
+	bAdvertisementUpdateInFlight = false;
+	bAdvertisementDirty = false;
+
 	if (bWasSearching && Sessions.IsValid())
 	{
 		// A search must be cancelled rather than forgotten: backends silently
@@ -1084,6 +1272,11 @@ void UUSSessionSubsystem::OnDestroySessionFinished(uint32 OperationId, bool bWas
 
 	const FString Reason = PendingSessionEndReason.IsEmpty() ? FString(TEXT("Unknown")) : PendingSessionEndReason;
 	PendingSessionEndReason.Reset();
+
+	AdvertisedSessionState = FUSAdvertisedSessionState();
+	bAdvertisementDirty = false;
+	bAdvertisementUpdateInFlight = false;
+	ClearUpdateSessionDelegate();
 
 	SetSessionState(EUSSessionState::Idle);
 	ReturnToEntryMap();
@@ -1435,6 +1628,20 @@ void UUSSessionSubsystem::ClearDestroySessionDelegate()
 	DestroySessionCompleteHandle.Reset();
 }
 
+void UUSSessionSubsystem::ClearUpdateSessionDelegate()
+{
+	if (!UpdateSessionCompleteHandle.IsValid())
+	{
+		return;
+	}
+
+	if (const IOnlineSessionPtr Sessions = GetSessionInterface(this))
+	{
+		Sessions->ClearOnUpdateSessionCompleteDelegate_Handle(UpdateSessionCompleteHandle);
+	}
+	UpdateSessionCompleteHandle.Reset();
+}
+
 void UUSSessionSubsystem::ClearRegisterPlayersDelegate()
 {
 	if (!RegisterPlayersCompleteHandle.IsValid())
@@ -1487,6 +1694,7 @@ void UUSSessionSubsystem::ClearSessionDelegates()
 	ClearFindSessionsDelegate();
 	ClearJoinSessionDelegate();
 	ClearDestroySessionDelegate();
+	ClearUpdateSessionDelegate();
 	ClearRegisterPlayersDelegate();
 	ClearLoginDelegate();
 	ClearBackendLoginDelegate();

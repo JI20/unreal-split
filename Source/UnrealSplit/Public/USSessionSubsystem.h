@@ -144,14 +144,49 @@ public:
 	bool LoginToBackend();
 
 	/**
-	 * Creates an advertised session and, on success, reopens the current level as
-	 * a listen server. Broadcasts OnSessionHostedDelegate either way.
+	 * Creates an advertised session and, on success, opens a listen server.
+	 *
+	 * With TravelToMap empty, the current level is reopened — the original host
+	 * path, and what tests still use. A non-empty map is opened instead, so a
+	 * title screen can host straight into a lobby without becoming the listen
+	 * server itself. Broadcasts OnSessionHostedDelegate either way.
+	 *
 	 * @param MaxPlayers Public connections to advertise, counting the host's own
 	 *   local players; clamped to 1..MaxTotalPlayers so the session can never
 	 *   advertise a seat the game would refuse to fill.
+	 * @param TravelToMap Package name or path to open as the listen server, or
+	 *   empty to reopen the current level.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "UnrealSplit|Session")
-	void HostSession(int32 MaxPlayers = 2);
+	void HostSession(int32 MaxPlayers = 2, const FString& TravelToMap = TEXT(""));
+
+	/**
+	 * Writes a Find-list snapshot onto the hosted session.
+	 *
+	 * Host only. Cached immediately; pushed to the backend while Hosting, or
+	 * stamped onto the next CreateSession while Idle/Creating. Clients are
+	 * refused — they cannot advertise on the host's session.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "UnrealSplit|Session")
+	void SetAdvertisedSessionState(const FUSAdvertisedSessionState& State);
+
+	/** The snapshot this machine last wrote, or default if it never has. */
+	UFUNCTION(BlueprintPure, Category = "UnrealSplit|Session")
+	FUSAdvertisedSessionState GetAdvertisedSessionState() const { return AdvertisedSessionState; }
+
+	/** Blueprint entry for FUSAdvertisedSessionState::GetFindListSummary (UHT forbids UFUNCTION on structs). */
+	UFUNCTION(BlueprintPure, Category = "UnrealSplit|Session")
+	static FString GetAdvertisedFindListSummary(const FUSAdvertisedSessionState& State)
+	{
+		return State.GetFindListSummary();
+	}
+
+	/** Blueprint entry for FUSAdvertisedSessionState::GetVacantLabels. */
+	UFUNCTION(BlueprintPure, Category = "UnrealSplit|Session")
+	static TArray<FString> GetAdvertisedVacantLabels(const FUSAdvertisedSessionState& State)
+	{
+		return State.GetVacantLabels();
+	}
 
 	/**
 	 * Searches for joinable sessions. Results are cached on the subsystem and
@@ -319,6 +354,7 @@ private:
 	void OnFindSessionsFinished(uint32 OperationId, bool bWasSuccessful);
 	void OnJoinSessionFinished(uint32 OperationId, bool bSuccess, const FString& ResultDescription);
 	void OnDestroySessionFinished(uint32 OperationId, bool bWasSuccessful);
+	void OnUpdateSessionFinished(FName SessionName, bool bWasSuccessful);
 
 	void HandleNetworkFailure(UWorld* World, UNetDriver* NetDriver, ENetworkFailure::Type FailureType, const FString& ErrorString);
 	void HandleTravelFailure(UWorld* World, ETravelFailure::Type FailureType, const FString& ErrorString);
@@ -387,6 +423,15 @@ private:
 	void ApplyDiscoveryKeys(FOnlineSessionSettings& Settings) const;
 	void ApplyDiscoveryKeys(FOnlineSessionSearch& Search) const;
 
+	/** Stamps or clears the Find-list snapshot on session settings. */
+	void ApplyAdvertisedSessionState(FOnlineSessionSettings& Settings) const;
+
+	/** Reads a Find-list snapshot off search or live session settings. */
+	static FUSAdvertisedSessionState ReadAdvertisedSessionState(const FOnlineSessionSettings& Settings);
+
+	/** Pushes the cached snapshot to the backend. No-op when not Hosting. */
+	void PushAdvertisedSessionStateToBackend();
+
 	/**
 	 * Common guard for the session entry points: reports whether the backend can
 	 * be used, and starts the missing login when it cannot, so a refused call
@@ -422,6 +467,7 @@ private:
 	void ClearFindSessionsDelegate();
 	void ClearJoinSessionDelegate();
 	void ClearDestroySessionDelegate();
+	void ClearUpdateSessionDelegate();
 	void ClearRegisterPlayersDelegate();
 	void ClearLoginDelegate();
 	void ClearSessionDelegates();
@@ -455,6 +501,21 @@ private:
 	/** Carried into OnDestroySessionFinished so the reason survives the async hop. */
 	FString PendingSessionEndReason;
 
+	/**
+	 * Map to open as the listen server when HostSession finishes, or empty to
+	 * reopen the current level. Cleared when the create completes or is abandoned.
+	 */
+	FString PendingHostTravelMap;
+
+	/** Last snapshot the game asked to advertise. Cleared when the session ends. */
+	FUSAdvertisedSessionState AdvertisedSessionState;
+
+	/** True while UpdateSession for that snapshot is in flight. */
+	bool bAdvertisementUpdateInFlight = false;
+
+	/** True when a newer snapshot arrived while an update was still in flight. */
+	bool bAdvertisementDirty = false;
+
 	/** Platform user whose login AddLocalCoopPlayer is waiting for, if any. */
 	int32 PendingLoginLocalUserIndex = INDEX_NONE;
 	FPlatformUserId PendingLoginPlatformUser = PLATFORMUSERID_NONE;
@@ -463,6 +524,7 @@ private:
 	FDelegateHandle FindSessionsCompleteHandle;
 	FDelegateHandle JoinSessionCompleteHandle;
 	FDelegateHandle DestroySessionCompleteHandle;
+	FDelegateHandle UpdateSessionCompleteHandle;
 	FDelegateHandle RegisterPlayersCompleteHandle;
 	FDelegateHandle LoginCompleteHandle;
 	FDelegateHandle BackendLoginCompleteHandle;

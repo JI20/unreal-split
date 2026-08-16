@@ -84,6 +84,75 @@ enum class EUSBackendStatus : uint8
 };
 
 /**
+ * What a Find row can say about a session without joining it.
+ *
+ * Unknown is "this host never wrote anything" (or an older build). Lobby means
+ * roles are not locked. InProgress means Start has written view slots, so a
+ * vacant slot is a missing character.
+ */
+UENUM(BlueprintType)
+enum class EUSAdvertisedSessionPhase : uint8
+{
+	Unknown,
+	Lobby,
+	InProgress
+};
+
+/** One view slot as advertised to searchers. Index in the parent array is the slot. */
+USTRUCT(BlueprintType)
+struct FUSAdvertisedSlot
+{
+	GENERATED_BODY()
+
+	/** Game-supplied name for this half of the screen, e.g. Elmar. */
+	UPROPERTY(BlueprintReadOnly, Category = "UnrealSplit|Session")
+	FString Label;
+
+	/** True when a live player currently occupies this slot. Ignored while Lobby. */
+	UPROPERTY(BlueprintReadOnly, Category = "UnrealSplit|Session")
+	bool bOccupied = false;
+};
+
+/**
+ * Host-written snapshot of a session for the Find list.
+ *
+ * UnrealSplit stores this as a few reserved online-session keys; it does not
+ * know character types. Labels come from the game. Extra is an escape hatch
+ * for one-off strings and is not the place to put Elmar or Kit.
+ */
+USTRUCT(BlueprintType)
+struct UNREALSPLIT_API FUSAdvertisedSessionState
+{
+	GENERATED_BODY()
+
+	UPROPERTY(BlueprintReadOnly, Category = "UnrealSplit|Session")
+	EUSAdvertisedSessionPhase Phase = EUSAdvertisedSessionPhase::Unknown;
+
+	/** View slots, in slot order. Empty when the host never wrote a snapshot. */
+	UPROPERTY(BlueprintReadOnly, Category = "UnrealSplit|Session")
+	TArray<FUSAdvertisedSlot> Slots;
+
+	/** Optional game-specific strings. Not used for character identity. */
+	UPROPERTY(BlueprintReadOnly, Category = "UnrealSplit|Session")
+	TMap<FString, FString> Extra;
+
+	/** Labels of slots that are empty while InProgress. Empty for Lobby / Unknown. */
+	TArray<FString> GetVacantLabels() const;
+
+	/**
+	 * One line for a Find row: "Lobby", "Kit missing", "In progress", or empty
+	 * when the host wrote nothing (fall back to session id).
+	 *
+	 * Not a UFUNCTION: UHT forbids those on structs. Blueprint uses
+	 * UUSSessionSubsystem::GetAdvertisedFindListSummary.
+	 */
+	FString GetFindListSummary() const;
+
+	void Pack(int32& OutPhase, FString& OutLabels, int32& OutOccupied, FString& OutExtra) const;
+	static FUSAdvertisedSessionState Unpack(int32 Phase, const FString& Labels, int32 Occupied, const FString& Extra);
+};
+
+/**
  * Backend-agnostic view of one session search result.
  *
  * Deliberately free of any Online Subsystem types so UI and Blueprint can show
@@ -126,4 +195,11 @@ struct FUSSessionSearchResultInfo
 	/** Public slots the host advertised in total. */
 	UPROPERTY(BlueprintReadOnly, Category = "UnrealSplit|Session")
 	int32 MaxPublicConnections = 0;
+
+	/**
+	 * What the host last wrote for the Find list. Phase Unknown means this build
+	 * of the host did not advertise a snapshot; Join still works.
+	 */
+	UPROPERTY(BlueprintReadOnly, Category = "UnrealSplit|Session")
+	FUSAdvertisedSessionState Advertised;
 };

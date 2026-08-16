@@ -29,7 +29,7 @@ using USConsole::ReportWarning;
 
 static FAutoConsoleCommandWithWorldArgsAndOutputDevice GUSHostCommand(
 	TEXT("US.Host"),
-	TEXT("UnrealSplit: create a session and reopen the current level as a listen server. Usage: US.Host [MaxPlayers] (defaults to 2). Counts every player in the game, local and remote, and is clamped to the game's total player cap."),
+	TEXT("UnrealSplit: create a session and open a listen server. Usage: US.Host [MaxPlayers] [Map]. MaxPlayers defaults to 2. An omitted map reopens the current level; a map name opens that level instead."),
 	FConsoleCommandWithWorldArgsAndOutputDeviceDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World, FOutputDevice& Ar)
 	{
 		UUSSessionSubsystem* Sessions = USConsole::FindSubsystem<UUSSessionSubsystem>(World, Ar);
@@ -51,10 +51,33 @@ static FAutoConsoleCommandWithWorldArgsAndOutputDevice GUSHostCommand(
 			return;
 		}
 
-		const int32 MaxPlayers = Args.Num() > 0 ? FCString::Atoi(*Args[0]) : 2;
-		Report(Ar, FString::Printf(TEXT("US.Host: creating a session for up to %d player(s) on '%s' (%s); the outcome follows in the log."),
-			MaxPlayers, *Sessions->GetBackendName().ToString(), *Sessions->DescribeDiscoveryKeys()));
-		Sessions->HostSession(MaxPlayers);
+		int32 MaxPlayers = 2;
+		FString TravelToMap;
+
+		if (Args.Num() >= 1)
+		{
+			if (Args[0].IsNumeric())
+			{
+				MaxPlayers = FCString::Atoi(*Args[0]);
+				if (Args.Num() >= 2)
+				{
+					TravelToMap = Args[1];
+				}
+			}
+			else
+			{
+				TravelToMap = Args[0];
+			}
+		}
+
+		Report(Ar, FString::Printf(TEXT("US.Host: creating a session for up to %d player(s) on '%s' (%s)%s; the outcome follows in the log."),
+			MaxPlayers,
+			*Sessions->GetBackendName().ToString(),
+			*Sessions->DescribeDiscoveryKeys(),
+			TravelToMap.IsEmpty()
+				? TEXT(", reopening this map")
+				: *FString::Printf(TEXT(", then opening '%s'"), *TravelToMap)));
+		Sessions->HostSession(MaxPlayers, TravelToMap);
 	}));
 
 static FAutoConsoleCommandWithWorldArgsAndOutputDevice GUSFindCommand(
@@ -274,6 +297,11 @@ static FAutoConsoleCommandWithWorldArgsAndOutputDevice GUSSessionStateCommand(
 				Settings.bAllowJoinViaPresence ? 1 : 0,
 				Settings.BuildUniqueId,
 				*Session->GetSessionIdStr()));
+
+			const FUSAdvertisedSessionState Advertised = Sessions->GetAdvertisedSessionState();
+			Report(Ar, FString::Printf(TEXT("    Find snapshot: Phase=%s Summary='%s'"),
+				*UEnum::GetValueAsString(Advertised.Phase),
+				*Advertised.GetFindListSummary()));
 		}
 		else
 		{
@@ -329,9 +357,10 @@ static FAutoConsoleCommandWithWorldArgsAndOutputDevice GUSSessionStateCommand(
 
 		for (int32 Index = 0; Index < Found.Num(); ++Index)
 		{
-			Report(Ar, FString::Printf(TEXT("    [%d] Id='%s' Owner='%s' Ping=%dms Slots=%d/%d"),
+			Report(Ar, FString::Printf(TEXT("    [%d] Id='%s' Owner='%s' Ping=%dms Slots=%d/%d Adv='%s'"),
 				Index, *Found[Index].SessionId, *Found[Index].OwnerName, Found[Index].PingInMs,
-				Found[Index].OpenPublicConnections, Found[Index].MaxPublicConnections));
+				Found[Index].OpenPublicConnections, Found[Index].MaxPublicConnections,
+				*Found[Index].Advertised.GetFindListSummary()));
 		}
 	}));
 
