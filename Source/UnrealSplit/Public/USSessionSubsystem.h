@@ -84,6 +84,24 @@ public:
 	UFUNCTION(BlueprintPure, Category = "UnrealSplit|Session")
 	EUSConnectionMode GetConnectionMode() const { return ConnectionMode; }
 
+	/**
+	 * Re-registers this world's players in the session after a seamless travel.
+	 *
+	 * A named session outlives a world, and nothing in a seamless travel logs a
+	 * player out, so in the ordinary case every registration made at login still
+	 * stands and this call finds nothing to do. It runs anyway because the
+	 * ordinary case is the only one the engine guarantees: HandleSeamlessTravelPlayer
+	 * may put a player on a freshly spawned controller, AGameSession::PostSeamlessTravel
+	 * is empty, and the post-login event this subsystem normally registers from
+	 * never fires for a carried player. Registering again is idempotent — the
+	 * backend answers a repeat with "already registered" — so the reconcile costs
+	 * one call per player per travel and removes the assumption.
+	 *
+	 * Authority only, matching the post-login path. A client registered itself when
+	 * it joined and that registration is not world-scoped.
+	 */
+	void ReregisterPlayersAfterSeamlessTravel();
+
 	/** Online subsystem this process runs on, e.g. for a status line. */
 	UFUNCTION(BlueprintPure, Category = "UnrealSplit|Session")
 	FName GetBackendName() const;

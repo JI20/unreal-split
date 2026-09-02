@@ -513,6 +513,61 @@ void UUSRemoteViewSubsystem::HandleSeamlessTravelStart(UWorld* World, const FStr
 	LastShadowViewNote = TEXT("travelling");
 }
 
+void UUSRemoteViewSubsystem::HandleSeamlessTravelPlayer(APlayerController* PlayerController)
+{
+	UWorld* const World = GetOwningWorld();
+
+	if (World == nullptr)
+	{
+		return;
+	}
+
+	// Seamless travel replaces a player's controller rather than moving it, and it
+	// does not log the old one out, so nothing else drops the entry it left behind.
+	// It has to go before the new one is served: a dead controller's proxy still
+	// answers IsViewSlotTaken for the slot that player just had, and the arriving
+	// controller would be handed a third one.
+	//
+	// Collected, then unmapped, then destroyed, in that order and never in one
+	// pass: destroying a proxy runs its EndPlay synchronously, which comes back
+	// through NotifyRemoteStreamLost and edits this same map. The logout path
+	// keeps its distance for the same reason.
+	TArray<TObjectPtr<APlayerController>> StaleOwners;
+	TArray<TObjectPtr<AUSPlayerViewProxy>> StaleProxies;
+
+	for (const TPair<TObjectPtr<APlayerController>, TObjectPtr<AUSPlayerViewProxy>>& Pair : ViewProxies)
+	{
+		if (!IsValid(Pair.Key.Get()))
+		{
+			StaleOwners.Add(Pair.Key);
+			StaleProxies.Add(Pair.Value);
+		}
+	}
+
+	for (const TObjectPtr<APlayerController>& StaleOwner : StaleOwners)
+	{
+		ViewProxies.Remove(StaleOwner);
+	}
+
+	for (const TObjectPtr<AUSPlayerViewProxy>& StaleProxy : StaleProxies)
+	{
+		if (AUSPlayerViewProxy* const Proxy = StaleProxy.Get())
+		{
+			Proxy->Destroy();
+		}
+	}
+
+	if (World->GetNetMode() != NM_Client)
+	{
+		EnsureViewProxyForPlayer(PlayerController);
+	}
+
+	EvaluateShadowView();
+
+	UE_LOG(LogUnrealSplit, Log, TEXT("Seamless travel: '%s' arrived; %d camera stream(s) in this world."),
+		*GetNameSafe(PlayerController), ViewProxies.Num());
+}
+
 void UUSRemoteViewSubsystem::EnsureViewProxyForPlayer(APlayerController* PlayerController)
 {
 	UWorld* const World = GetOwningWorld();

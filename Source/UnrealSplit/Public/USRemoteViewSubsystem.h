@@ -162,6 +162,29 @@ public:
 	 */
 	void NotifyViewSlotsChanged();
 
+	/**
+	 * Serves one player that a seamless travel has just re-attached.
+	 *
+	 * Streams are normally created from the post-login event, which a seamless
+	 * travel never fires: a carried player goes through HandleSeamlessTravelPlayer
+	 * instead and never logs in again. Without this the new world has no proxies
+	 * and both machines come up showing only their own view.
+	 *
+	 * Per player rather than a sweep of the world, because the two players do not
+	 * arrive together: the host is re-attached inside PostSeamlessTravel, while a
+	 * remote client is re-attached only when it reports the new world loaded
+	 * (APlayerController::ServerNotifyLoadedWorld), which is later. A sweep run at
+	 * either moment serves one of them and the stale controller of the other.
+	 *
+	 * Also drops the proxy the replaced controller left behind, which would
+	 * otherwise keep holding that player's view slot.
+	 *
+	 * Call it from AGameModeBase::HandleSeamlessTravelPlayer after Super, which is
+	 * where the swap has happened and the controller passed here is the live one.
+	 * Prefer UnrealSplit::NotifySeamlessTravelPlayer, which also covers sessions.
+	 */
+	void HandleSeamlessTravelPlayer(APlayerController* PlayerController);
+
 private:
 	/** This game instance's world, or null between worlds. */
 	UWorld* GetOwningWorld() const;

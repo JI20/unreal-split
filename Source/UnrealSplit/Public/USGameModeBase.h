@@ -26,5 +26,6 @@ public:
 	//~ Begin AGameModeBase interface
 	virtual void PostLogin(APlayerController* NewPlayer) override;
 	virtual void Logout(AController* Exiting) override;
+	virtual void HandleSeamlessTravelPlayer(AController*& C) override;
 	//~ End AGameModeBase interface
 };

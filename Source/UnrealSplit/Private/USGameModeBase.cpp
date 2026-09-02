@@ -39,6 +39,16 @@ void AUSGameModeBase::PostLogin(APlayerController* NewPlayer)
 		(NewPlayer && NewPlayer->IsLocalController()) ? 1 : 0);
 }
 
+void AUSGameModeBase::HandleSeamlessTravelPlayer(AController*& C)
+{
+	// Super first: it is what swaps this player onto its new controller, and C is
+	// only the live one afterwards. Notifying before it would serve the controller
+	// the travel is about to destroy.
+	Super::HandleSeamlessTravelPlayer(C);
+
+	UnrealSplit::NotifySeamlessTravelPlayer(Cast<APlayerController>(C));
+}
+
 void AUSGameModeBase::Logout(AController* Exiting)
 {
 	// Logged before Super, which is where the controller is removed from the count.

@@ -5,6 +5,7 @@
 #include "Engine/Engine.h"
 #include "Engine/GameInstance.h"
 #include "Engine/LocalPlayer.h"
+#include "Engine/PendingNetGame.h"
 #include "Engine/World.h"
 #include "GameFramework/GameModeBase.h"
 #include "GameFramework/GameStateBase.h"
@@ -79,6 +80,48 @@ namespace
 		const UGameInstance* GameInstance = Subsystem ? Subsystem->GetGameInstance() : nullptr;
 		const UWorld* World = GameInstance ? GameInstance->GetWorld() : nullptr;
 		return World ? Online::GetSessionInterface(World) : nullptr;
+	}
+
+	/**
+	 * Whether an engine-wide failure broadcast belongs to this subsystem's game
+	 * instance. GEngine broadcasts globally and PIE runs several instances at
+	 * once, so a failure has to be matched to an owner before it is acted on.
+	 *
+	 * The world is the obvious owner, and for a failure on a live connection it
+	 * is the only one needed. It is null for the case that matters most: a
+	 * failure on the pending connection. UPendingNetGame never gives its driver
+	 * a world (PendingNetGame.cpp never calls SetWorld), and the pending
+	 * connection is precisely the one that exists while travelling — so a
+	 * world-only test drops every failure that happens mid-travel, which is when
+	 * a session is most likely to break in the first place.
+	 *
+	 * Those are matched by driver instead, against this game instance's own
+	 * pending travel. PIE stays isolated either way: another instance's pending
+	 * game owns a different driver.
+	 */
+	bool IsFailureForThisGameInstance(const UUSSessionSubsystem* Subsystem, const UWorld* World, const UNetDriver* NetDriver)
+	{
+		const UGameInstance* const GameInstance = Subsystem ? Subsystem->GetGameInstance() : nullptr;
+
+		if (GameInstance == nullptr)
+		{
+			return false;
+		}
+
+		if (World != nullptr)
+		{
+			return World->GetGameInstance() == GameInstance;
+		}
+
+		if (NetDriver == nullptr)
+		{
+			return false;
+		}
+
+		const FWorldContext* const Context = GameInstance->GetWorldContext();
+		const UPendingNetGame* const Pending = Context ? Context->PendingNetGame : nullptr;
+
+		return Pending != nullptr && Pending->NetDriver == NetDriver;
 	}
 
 	/** Identity interface of the same backend; missing on backends without one. */
@@ -1285,10 +1328,9 @@ void UUSSessionSubsystem::OnDestroySessionFinished(uint32 OperationId, bool bWas
 	OnSessionEndedDelegate.Broadcast(Reason);
 }
 
-void UUSSessionSubsystem::HandleNetworkFailure(UWorld* World, UNetDriver* /*NetDriver*/, ENetworkFailure::Type FailureType, const FString& ErrorString)
+void UUSSessionSubsystem::HandleNetworkFailure(UWorld* World, UNetDriver* NetDriver, ENetworkFailure::Type FailureType, const FString& ErrorString)
 {
-	// GEngine broadcasts globally; PIE runs several game instances at once.
-	if (World == nullptr || World->GetGameInstance() != GetGameInstance())
+	if (!IsFailureForThisGameInstance(this, World, NetDriver))
 	{
 		return;
 	}
@@ -1305,7 +1347,10 @@ void UUSSessionSubsystem::HandleNetworkFailure(UWorld* World, UNetDriver* /*NetD
 
 void UUSSessionSubsystem::HandleTravelFailure(UWorld* World, ETravelFailure::Type FailureType, const FString& ErrorString)
 {
-	if (World == nullptr || World->GetGameInstance() != GetGameInstance())
+	// Travel failures always carry the world they failed into, so the driver arm
+	// of the check is unused here; it shares the helper to keep one definition of
+	// "this game instance's failure".
+	if (!IsFailureForThisGameInstance(this, World, nullptr))
 	{
 		return;
 	}
@@ -1394,6 +1439,36 @@ void UUSSessionSubsystem::HandleGameModePostLogin(AGameModeBase* GameMode, APlay
 	// remote ones. Both came from the same backend, because there is only one.
 	TryRegisterPlayerInSession(PlayerState->GetUniqueId(),
 		NewPlayer->IsLocalController() ? TEXT("a local login") : TEXT("a remote login"));
+}
+
+void UUSSessionSubsystem::ReregisterPlayersAfterSeamlessTravel()
+{
+	const UGameInstance* const GameInstance = GetGameInstance();
+	UWorld* const World = GameInstance != nullptr ? GameInstance->GetWorld() : nullptr;
+
+	if (World == nullptr || World->GetNetMode() == NM_Client)
+	{
+		return;
+	}
+
+	for (FConstPlayerControllerIterator It = World->GetPlayerControllerIterator(); It; ++It)
+	{
+		const APlayerController* const PlayerController = It->Get();
+		const APlayerState* const PlayerState = PlayerController != nullptr ? PlayerController->PlayerState : nullptr;
+
+		if (PlayerState == nullptr)
+		{
+			continue;
+		}
+
+		// Same id and same reasoning as the post-login path: the authority copied it
+		// from the local player for its own players and read it off the wire for
+		// remote ones, and there is only one backend for both to have come from.
+		TryRegisterPlayerInSession(PlayerState->GetUniqueId(),
+			PlayerController->IsLocalController()
+				? TEXT("a local player carried across seamless travel")
+				: TEXT("a remote player carried across seamless travel"));
+	}
 }
 
 void UUSSessionSubsystem::RegisterLocalPlayersWithSession(const FString& Context)
