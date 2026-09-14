@@ -53,6 +53,8 @@ public:
 	//~ Begin UGameViewportClient interface
 	virtual void Tick(float DeltaTime) override;
 	virtual void LayoutPlayers() override;
+	virtual bool InputKey(const FInputKeyEventArgs& EventArgs) override;
+	virtual bool InputAxis(const FInputKeyEventArgs& EventArgs) override;
 	//~ End UGameViewportClient interface
 
 	/**

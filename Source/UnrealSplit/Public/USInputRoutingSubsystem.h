@@ -3,10 +3,12 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "InputCoreTypes.h"
 #include "Subsystems/GameInstanceSubsystem.h"
 #include "USInputRoutingSubsystem.generated.h"
 
 class ULocalPlayer;
+class IInputProcessor;
 
 /**
  * One input device on this machine, as a device-selection menu needs to see it.
@@ -47,6 +49,17 @@ struct FUSInputDeviceInfo
 /** Fired whenever the device list or its player assignments change. */
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FUSOnInputDevicesChanged);
 
+UENUM(BlueprintType)
+enum class EUSDeviceCaptureResult : uint8
+{
+	Assigned,
+	Cancelled,
+	Disconnected,
+	Failed
+};
+
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FUSOnDeviceCaptureFinished, EUSDeviceCaptureResult, Result, int32, DeviceId, int32, PlayerIndex);
+
 /**
  * Input device routing for UnrealSplit: which physical device drives which
  * local player on this machine.
@@ -61,7 +74,7 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE(FUSOnInputDevicesChanged);
  * Nothing here is replicated or has any authority side. Each machine routes its
  * own hardware, and the server only ever sees players, not the devices behind
  * them — so the same assignment code covers standalone splitscreen and both
- * network modes, and two machines with one player each never need it at all.
+ * network modes, including device setup for one local player on each machine.
  *
  * Its one real use beyond player preference is testing network modes on a single
  * machine: two game processes each enumerate every pad and each hands its first
@@ -98,9 +111,8 @@ public:
 	 * Routes one input device to a local player, taking effect on the next input
 	 * event; no player controller or input mapping context has to be rebuilt.
 	 *
-	 * The assignment lasts until the platform re-pairs the device, which it does
-	 * when the device reconnects — so a pad that goes to sleep comes back on its
-	 * default user, and a menu that cares should reapply on the change delegate.
+	 * Explicit assignments survive reconnects while the target local player exists.
+	 * Platform-user identities on local players themselves are never changed.
 	 *
 	 * @param DeviceId Device from GetInputDevices().
 	 * @param PlayerIndex Local player to route it to, 0-based.
@@ -109,6 +121,27 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "UnrealSplit|Input")
 	bool AssignInputDeviceToPlayer(int32 DeviceId, int32 PlayerIndex);
+
+	/** Physically unpairs the device. It can no longer drive any local player. */
+	UFUNCTION(BlueprintCallable, Category = "UnrealSplit|Input")
+	bool UnassignInputDevice(int32 DeviceId);
+
+	/** One capture across the process. The initiating press is never captured. */
+	UFUNCTION(BlueprintCallable, Category = "UnrealSplit|Input")
+	bool BeginDeviceCapture(int32 PlayerIndex);
+
+	UFUNCTION(BlueprintCallable, Category = "UnrealSplit|Input")
+	void CancelDeviceCapture();
+
+	UFUNCTION(BlueprintPure, Category = "UnrealSplit|Input")
+	bool IsCapturingDevice() const { return CapturePlayerIndex != INDEX_NONE; }
+
+	UPROPERTY(BlueprintAssignable, Category = "UnrealSplit|Input")
+	FUSOnDeviceCaptureFinished OnDeviceCaptureFinished;
+
+	/** Used before Slate dispatch; only accepts physical button-down events. */
+	bool ProcessCaptureInput(FInputDeviceId DeviceId, FKey Key, bool bRepeat);
+	bool IsDeviceUnassigned(FInputDeviceId DeviceId) const;
 
 	/**
 	 * Exchanges every device between two local players, the usual "swap
@@ -138,4 +171,13 @@ private:
 
 	FDelegateHandle DeviceConnectionChangeHandle;
 	FDelegateHandle DevicePairingChangeHandle;
+	TSharedPtr<IInputProcessor> CaptureProcessor;
+	int32 CapturePlayerIndex = INDEX_NONE;
+	uint64 CaptureStartFrame = 0;
+	bool bApplyingAssignment = false;
+	// Explicit ownership survives platform reconnect; weak seats cannot alias a new player.
+	TMap<int32, TWeakObjectPtr<ULocalPlayer>> ExplicitAssignments;
+	TSet<int32> UnassignedDevices;
+	void FinishDeviceCapture(EUSDeviceCaptureResult Result, int32 DeviceId);
+	void FlushPlayerInput(FPlatformUserId UserId) const;
 };

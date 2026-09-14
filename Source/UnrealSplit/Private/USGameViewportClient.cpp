@@ -13,8 +13,37 @@
 #include "UnrealSplitModule.h"
 #include "USPlayerViewProxy.h"
 #include "USRemoteViewSubsystem.h"
+#include "USInputRoutingSubsystem.h"
 #include "USShadowLocalPlayer.h"
 #include "USSpectatorPlayerController.h"
+
+bool UUSGameViewportClient::InputKey(const FInputKeyEventArgs& EventArgs)
+{
+	const UUSInputRoutingSubsystem* Routing = GetGameInstance() ? GetGameInstance()->GetSubsystem<UUSInputRoutingSubsystem>() : nullptr;
+	if (Routing && Routing->IsCapturingDevice()) return true;
+	if (Routing && Routing->IsDeviceUnassigned(EventArgs.InputDevice))
+	{
+		// A front end can explicitly accept unassigned devices through the engine's
+		// override hook. They must never fall through to normal gameplay routing.
+		FInputKeyEventArgs MutableEventArgs=EventArgs;
+		if (OnOverrideInputKey().IsBound()) OnOverrideInputKey().Execute(MutableEventArgs);
+		return true;
+	}
+	return Super::InputKey(EventArgs);
+}
+
+bool UUSGameViewportClient::InputAxis(const FInputKeyEventArgs& EventArgs)
+{
+	const UUSInputRoutingSubsystem* Routing = GetGameInstance() ? GetGameInstance()->GetSubsystem<UUSInputRoutingSubsystem>() : nullptr;
+	if (Routing && Routing->IsCapturingDevice()) return true;
+	if (Routing && Routing->IsDeviceUnassigned(EventArgs.InputDevice))
+	{
+		FInputKeyEventArgs MutableEventArgs=EventArgs;
+		if (OnOverrideInputAxis().IsBound()) OnOverrideInputAxis().Execute(MutableEventArgs,MutableEventArgs.AmountDepressed,MutableEventArgs.DeltaTime,MutableEventArgs.NumSamples);
+		return true;
+	}
+	return Super::InputAxis(EventArgs);
+}
 
 namespace
 {

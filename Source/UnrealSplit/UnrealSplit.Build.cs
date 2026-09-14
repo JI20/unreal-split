@@ -24,6 +24,8 @@ public class UnrealSplit : ModuleRules
 			{
 				// IPlatformInputDeviceMapper, for pairing local co-op players with input devices.
 				"ApplicationCore",
+				"Slate",
+				"SlateCore",
 				// FUniqueNetIdWrapper, the backend-agnostic player id logged during registration.
 				"CoreOnline",
 				// UGameMapsSettings, for the entry-map fallback when a session ends.
