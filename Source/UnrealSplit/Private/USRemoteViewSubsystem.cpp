@@ -356,7 +356,11 @@ void UUSRemoteViewSubsystem::DestroyShadowView(const TCHAR* Reason)
 	// RemoveLocalPlayer destroys the player's controller when that controller has
 	// authority, which a locally spawned one always does, so this normally takes
 	// the spectator controller with it.
-	if (GameInstance != nullptr && ShadowPlayer != nullptr)
+	// PIE shutdown may have already removed the shadow before a real player's
+	// removal callback reaches us. Only unregister it while it is still in the
+	// game instance; the remaining cleanup below also handles that stale reference.
+	if (GameInstance != nullptr && ShadowPlayer != nullptr
+		&& GameInstance->GetLocalPlayers().Contains(ShadowPlayer.Get()))
 	{
 		GameInstance->RemoveLocalPlayer(ShadowPlayer);
 	}
