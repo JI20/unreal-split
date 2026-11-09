@@ -1,7 +1,7 @@
 # UnrealSplit testing protocol
 
 Repeatable checklist for sessions, remote view, and network-condition study.
-Packet simulation is **opt-in only** — nothing in this plugin or the game's
+Packet simulation is **opt-in only** — nothing in this plugin or your
 `DefaultEngine.ini` turns lag/loss on at launch. You must run `US.NetProfile`
 (or pass `-ExecCmds=`) yourself.
 
@@ -11,14 +11,14 @@ Packet simulation is **opt-in only** — nothing in this plugin or the game's
   `DO_ENABLE_NET_TEST`).
 - For EOS: Developer Authentication Tool running on `localhost:6300` with
   `dev1` / `dev2` (or your chosen passwords).
-- Launchers (optional), in the game repo: `Scripts/run-local.ps1` (one window,
-  Null — couch, layout, audio, automation), `Scripts/run-lan-pair.ps1`,
-  `Scripts/run-eos-pair.ps1`. **Do not** pass `-NetProfile` unless you intend to
-  inject conditions.
+- Launching: a Standalone Game for couch play, or two game processes with
+  `-ConnectionMode=Null` (LAN) or `-ConnectionMode=EOS` plus the dev-auth
+  arguments (EOS), see [Docs/Configuration.md](Docs/Configuration.md). **Do not**
+  apply a net profile unless you intend to inject conditions.
 
 ## 1. Couch (local splitscreen)
 
-- [ ] One process, no session (`.\Scripts\run-local.ps1`, or Standalone Game).
+- [ ] One process, no session (Standalone Game).
       `US.AddLocalPlayer` → two real locals.
 - [ ] Views split; `US.ViewState` shows no shadow view.
 - [ ] `US.NetProfile good` then move around — framing should feel unchanged
@@ -27,7 +27,7 @@ Packet simulation is **opt-in only** — nothing in this plugin or the game's
 
 ## 2. LAN pair (Null)
 
-- [ ] `.\Scripts\run-lan-pair.ps1` (or two windows with `-ConnectionMode=Null`).
+- [ ] Two game windows with `-ConnectionMode=Null`.
 - [ ] Host: `US.Host` — Client: `US.Find` → `US.Join`.
 - [ ] Both machines: two view slots, Fixed order (host left / player 1 left).
 - [ ] `US.ViewState` — shadow active on the one-local machine; buffer depth,
@@ -73,7 +73,7 @@ land well, music does not.
 
 ### Remote
 
-- [ ] `.\Scripts\run-lan-pair.ps1`, host/join, partner walks far away on machine B.
+- [ ] LAN pair (two windows with `-ConnectionMode=Null`), host/join, partner walks far away on machine B.
 - [ ] On A, default (`own`): partner's footsteps inaudible.
 - [ ] `US.AudioMode shared` on **A only** → audible, from the shadow view's
       perspective (delayed and smoothed exactly like the image).
@@ -88,7 +88,7 @@ land well, music does not.
 
 ## 5. EOS pair
 
-- [ ] Dev Auth Tool up. `.\Scripts\run-eos-pair.ps1` (auth args baked in).
+- [ ] Dev Auth Tool up. Two game windows with `-ConnectionMode=EOS -AUTH_TYPE=developer -AUTH_LOGIN=localhost:6300 -AUTH_PASSWORD=dev1` (`dev2` for the second).
 - [ ] Same host/find/join smoke as LAN.
 - [ ] Optional: one profile tier (e.g. `good` or `average`) — remember real EOS
       latency stacks with injection.
@@ -109,16 +109,16 @@ Tests must run in the **same process** as the game world. Two ways:
 
 ### A. Standalone game (preferred)
 
-Play dropdown → **Standalone Game**, or `.\Scripts\run-local.ps1` without the
+Play dropdown → **Standalone Game**, or a Development build without the
 editor open at all. In the game window press `` ` `` and run:
 
 ```
 Automation RunTests UnrealSplit
 ```
 
-`.\Scripts\run-local.ps1 -Tests` does the same through `-ExecCmds` and leaves the
-window up so you can read the results. It refuses to combine with `-NetProfile`,
-since the suite must never run against injected conditions.
+Passing `-ExecCmds="Automation RunTests UnrealSplit"` at launch does the same.
+Never combine it with a net profile: the suite must not run against injected
+conditions.
 
 The editor stays out of it entirely; travel happens in the throwaway process.
 
@@ -141,7 +141,7 @@ Needs a game world too, so run the game target (not `-ExecCmds` on a bare
 editor, which would skip everything):
 
 ```
-wavelengths.exe /Game/ThirdPersonTemplate/ThirdPerson/Lvl_ThirdPerson -ConnectionMode=Null -ExecCmds="Automation RunTests UnrealSplit; Quit" -unattended -nopause -log -ReportExportPath="D:/temp/us-automation"
+<YourGame>.exe <MapPath> -ConnectionMode=Null -ExecCmds="Automation RunTests UnrealSplit; Quit" -unattended -nopause -log -ReportExportPath="<ReportFolder>"
 ```
 
 EOS login is not required for this suite; Null is enough.
@@ -174,6 +174,6 @@ from this suite (hard rule: tests report, they don’t patch runtime).
 
 ## Profiles reference
 
-Defined in the game `Config/DefaultEngine.ini` as
+Defined in your project's `Config/DefaultEngine.ini` (see [Docs/Configuration.md](Docs/Configuration.md#network-condition-profiles-optional)) as
 `[PacketSimulationProfile.<name>]`. Wrapper: `US.NetProfile <name|off>`.
 Engine equivalent: `NetEmulation.PktEmulationProfile` / `NetEmulation.Off`.
