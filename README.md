@@ -13,3 +13,9 @@ Do **not** drive the player view with Experimental **Gameplay Cameras** (`AGamep
 If a project ships both, the Gameplay Camera path must be off at runtime so the spring-arm camera is what the manager reports. `US.ViewState` is the check: both halves should show the same kind of follow camera.
 
 This is a plugin limitation, not a game-specific quirk. Call it out when documenting or integrating UnrealSplit.
+
+## License
+
+UnrealSplit is licensed under the [Apache License 2.0](LICENSE). You can use it in free and commercial projects, modify it and redistribute it. When you distribute it, include the [LICENSE](LICENSE) and [NOTICE](NOTICE) files.
+
+If you ship something with UnrealSplit, a mention in your credits would make my day.
